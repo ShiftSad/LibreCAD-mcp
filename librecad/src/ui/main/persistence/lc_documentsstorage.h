@@ -47,6 +47,13 @@ public:
     bool loadDocument(const RS_Document *document, const QString &fileName) const;
     bool loadDocumentFromTemplate(const RS_Document *document, const RS_GraphicView *graphicView, const QString &fileName, RS2::FormatType type) const;
     QString createAutoSaveFileName(const QFileInfo &fileInfo) const;
+    /**
+     * Whether a document this storage loads tells the user what its import
+     * noticed (such as content kept on paper-space layouts). Only the opening
+     * of a drawing as a document wants that; a thumbnail, a block-library
+     * preview or a plugin's load does not. Off by default.
+     */
+    void setReportsImportNotices(bool report) { m_reportsImportNotices = report; }
 protected:
     bool doSaveGraphicAs(RS_Graphic* graphic, RS_GraphicView *graphicView, bool &cancelled, const QString& currentFileName = "",
                          RS2::FormatType preferredType = RS2::FormatUnknown);
@@ -64,6 +71,8 @@ protected:
                            const RS_Graphic* graphic = nullptr);
     QString createAutoSaveFileName(const QFileInfo &fileInfo, const QString &filePrefix) const;
     QString createAutoSaveFileName(const QString &path, const QString &filePrefix, const QString &fileName) const;
+private:
+    bool m_reportsImportNotices = false;
 };
 
 #endif

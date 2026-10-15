@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include <cstdlib>
+#include <iostream>
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -67,11 +68,13 @@ bool convertFile(const QString& inputFile, const QString& outputFile, RS2::Forma
         qCritical("ERROR: failed to export '%s'", qPrintable(outputFile));
         return false;
     }
-    // What the file could not hold; the export itself went through.
+    // What the file could not hold; the export itself went through. On
+    // stderr, whatever the Qt message handler or logging rules let through.
     const QString leftOut = RS_FileIO::instance()->lastExportReport();
     if (!leftOut.isEmpty()) {
-        qWarning("WARNING: left out of '%s': %s", qUtf8Printable(outputFile),
-                 qUtf8Printable(leftOut.split(QLatin1Char('\n')).join(QStringLiteral("; "))));
+        std::cerr << "WARNING: left out of '" << outputFile.toStdString() << "': "
+                  << leftOut.split(QLatin1Char('\n')).join(QStringLiteral("; ")).toStdString()
+                  << std::endl;
     }
 
 #ifdef DWGSUPPORT

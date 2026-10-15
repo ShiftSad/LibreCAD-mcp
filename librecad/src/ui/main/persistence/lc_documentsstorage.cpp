@@ -83,6 +83,15 @@ namespace {
         return RS_FileIO::instance()->canExport(graphic->getFormatType());
     }
 
+    /**
+     * What saving the drawing back to its file would leave out of what the
+     * drawing keeps, such as the content of layouts its format version cannot
+     * hold; empty if nothing.
+     */
+    QString saveInPlaceLeavesOut(const RS_Graphic* graphic) {
+        return RS_FileIO::instance()->exportLeavesOut(*graphic, graphic->getFormatType());
+    }
+
     QString recoveryCopyName(const QString& fileName) {
         const QFileInfo info(fileName);
         return info.dir().filePath(info.completeBaseName() + QStringLiteral("_recovered.dxf"));
@@ -112,6 +121,13 @@ bool LC_DocumentsStorage::saveDocument(RS_Document* document, RS_GraphicView * g
                 tr("LibreCAD cannot save \"%1\" in its own format. Choose a name to save the drawing as.")
                     .arg(QFileInfo(fileName).fileName()));
             result = doSaveGraphicAs(graphic, graphicView, cancelled, fileName, RS2::FormatDXFRW);
+        } else if (const QString leftOut = saveInPlaceLeavesOut(graphic); !leftOut.isEmpty()) {
+            // A save in place may not quietly overwrite the file with less than it holds.
+            RS_DIALOGFACTORY->commandMessage(
+                tr("Saving \"%1\" in its own format would leave out %2. Choose a name and format to save the "
+                   "drawing as.")
+                    .arg(QFileInfo(fileName).fileName(), leftOut));
+            result = doSaveGraphicAs(graphic, graphicView, cancelled, fileName, RS2::FormatDXFRW2018);
         } else {
             const QFileInfo info(fileName);
             if (!info.isWritable()) {
@@ -237,7 +253,9 @@ bool LC_DocumentsStorage::loadGraphic(RS_Graphic* graphic, const QString &filena
                                      const RS2::DxfTextEncoding encoding) const {
     graphic->initForNewDocument();
 
+    graphic->setReportsImportNotices(m_reportsImportNotices);
     const bool ret = RS_FileIO::instance()->fileImport(*graphic, filename, type, nullptr, encoding);
+    graphic->setReportsImportNotices(false);
 
     if (ret) {
         graphic->onLoadingCompleted();

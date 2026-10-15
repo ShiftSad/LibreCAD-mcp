@@ -43,6 +43,7 @@
 #include <QString>
 #include <QStringList>
 
+#include "lc_documentsstorage.h"
 #include "lc_filtertestsupport.h"
 #include "lc_paperspacestore.h"
 #include "rs_block.h"
@@ -660,6 +661,53 @@ TEST_CASE("Only a drawing opened as a document tells what its layouts keep",
               QStringLiteral("3 object(s) on paper-space layouts (Layout1) are not shown in model "
                              "space; they are kept and saved with the drawing."));
     }
+}
+
+namespace {
+/// Answers Save As by cancelling it, and notes what it offered.
+class AskingStorage final : public LC_DocumentsStorage {
+public:
+    int asked = 0;
+    RS2::FormatType offered = RS2::FormatUnknown;
+
+protected:
+    LC_FileDialogService::FileDialogResult askSaveFileDetails(const QString&,
+                                                              const RS2::FormatType preferredType) override {
+        ++asked;
+        offered = preferredType;
+        return {};
+    }
+};
+} // namespace
+
+TEST_CASE("A save in place that would leave layout content out asks for a name first",
+          "[dxf][paper-space][save]") {
+    REQUIRE(lc::test::ensureSettings());
+    lc::test::QuietLog quiet;
+    lc::test::OutputDirectory directory("lc_dxf_paper_space_save_in_place");
+    const auto source = directory.file("layouts.dxf");
+    writeText(source, layoutsDxf());
+    const std::string original = lc::test::fileBytes(source);
+    RS_Graphic graphic;
+    REQUIRE(lc::test::importDrawing(graphic, source, RS2::FormatDXFRW));
+    graphic.setFilename(lc::test::toQString(source));
+    // As if the file were an R14 DXF, which holds the active layout only:
+    // Save may not overwrite it with Layout2 left out.
+    graphic.setFormatType(RS2::FormatDXFRW14);
+    graphic.setModified(true);
+
+    CommandLine commandLine;
+    AskingStorage storage;
+    bool cancelled = false;
+    CHECK(storage.saveDocument(&graphic, nullptr, cancelled));
+    CHECK(cancelled);
+    CHECK(storage.asked == 1);
+    CHECK(storage.offered == RS2::FormatDXFRW2018);
+    CHECK(lc::test::fileBytes(source) == original);
+    CHECK(graphic.isModified());
+    REQUIRE(commandLine.messages.size() == 1);
+    CHECK(commandLine.messages.front().contains(
+        QStringLiteral("would leave out 2 object(s) on paper-space layouts (Layout2)")));
 }
 
 TEST_CASE("A layout shown in model space keeps its drawing order",

@@ -68,6 +68,9 @@ public:
      *         false for RS2::FormatUnknown.
      */
     bool canExport(RS2::FormatType type) const;
+    /** What a save of @p graphic in format @p type would leave out of what it
+     *  keeps, told before the save (RS_FilterInterface::exportLeavesOut). */
+    QString exportLeavesOut(const RS_Graphic& graphic, RS2::FormatType type) const;
     /** \brief detectFormat detect file format type
      * \param file type
      * \param forRead read the file to verify dxf/dxfrw type, default to true

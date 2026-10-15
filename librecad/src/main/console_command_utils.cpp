@@ -293,6 +293,9 @@ bool importGraphic(RS_Graphic& graphic, const QString& inputFile, RS2::FormatTyp
     }
 
     graphic.initForNewDocument();
+    // A converter tells, on stderr, what the import noticed, as the
+    // application does in its command line.
+    graphic.setReportsImportNotices(true);
 
     bool reported = false;
     const bool imported = RS_FileIO::instance()->fileImport(

@@ -108,6 +108,8 @@
 #include "rs_actioninterface.h"
 #include "rs_actionprintpreview.h"
 #include "rs_debug.h"
+#include "rs_dialogfactory.h"
+#include "rs_dialogfactoryinterface.h"
 #include "rs_fileio.h"
 #include "rs_settings.h"
 #include "rs_units.h"
@@ -893,6 +895,14 @@ bool QC_ApplicationWindow::doSave(QC_MDIWindow* w, const bool forceSaveAs) {
                 : tr("Saved drawing: %1. Left out: %2")
                       .arg(drawingFileFullPath, leftOut.split(QLatin1Char('\n')).join(QStringLiteral("; ")));
             showStatusMessage(msg, 2000);
+            // What the file could not hold stays in the command line, where the status bar's two
+            // seconds do not take it away.
+            if (!leftOut.isEmpty()) {
+                RS_DIALOGFACTORY->commandMessage(tr("Saved drawing: %1. Left out of the file:").arg(drawingFileFullPath));
+                for (const QString& line : leftOut.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+                    RS_DIALOGFACTORY->commandMessage(QStringLiteral("  ") + line);
+                }
+            }
 
             m_recentFilesList->addIfAbsent(drawingFileFullPath);
 

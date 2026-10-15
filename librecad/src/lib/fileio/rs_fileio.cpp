@@ -234,6 +234,14 @@ bool RS_FileIO::canExport(const RS2::FormatType type) const {
     return type != RS2::FormatUnknown && getExportFilter(QString(), type) != nullptr;
 }
 
+QString RS_FileIO::exportLeavesOut(const RS_Graphic& graphic, const RS2::FormatType type) const {
+    if (type == RS2::FormatUnknown) {
+        return {};
+    }
+    const std::unique_ptr<RS_FilterInterface> filter = getExportFilter(QString(), type);
+    return filter != nullptr ? filter->exportLeavesOut(graphic, type) : QString();
+}
+
 RS_FileIO* RS_FileIO::instance() {
     static RS_FileIO* uniqueInstance = nullptr;
     if (uniqueInstance == nullptr) {
