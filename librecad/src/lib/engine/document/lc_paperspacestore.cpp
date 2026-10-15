@@ -121,6 +121,7 @@ unsigned LC_PaperSpaceStore::count() const {
 
 void LC_PaperSpaceStore::clear() {
     m_spaces.clear();
+    m_viewportsNotRead = 0;
 }
 
 std::vector<std::unique_ptr<RS_Entity>> LC_PaperSpaceStore::takeEntities(const QString& name) {

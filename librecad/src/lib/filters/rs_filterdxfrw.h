@@ -2130,7 +2130,9 @@ public:
   void addLeader(const DRW_Leader *data) override;
   void addHatch(const DRW_Hatch *data) override;
 
-  void addViewport(const DRW_Viewport & /*data*/) override {}
+  /** LibreCAD keeps no VIEWPORT: it is counted, for the user to know
+   *  (LC_PaperSpaceStore::viewportsNotRead()). */
+  void addViewport(const DRW_Viewport &data) override;
 
   void addImage(const DRW_Image *data) override;
   void linkImage(const DRW_ImageDef *data) override;
@@ -3170,6 +3172,8 @@ private:
   // Entities of layouts the last export had no place for, and why.
   std::size_t m_paperSpaceEntitiesLeftOut = 0;
   QString m_paperSpaceLeftOutReason;
+  /** The layouts' VIEWPORTs the drawing exported did not read. */
+  unsigned m_viewportsLeftOut = 0;
   QString m_shapeExportDirectory;
   std::map<std::uint32_t, QString> m_shapeFileResolvedPaths;
   struct ShapeExportRecord {

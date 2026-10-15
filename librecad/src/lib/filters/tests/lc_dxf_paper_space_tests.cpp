@@ -1003,6 +1003,36 @@ TEST_CASE("A layout a DWG cannot write is left out of a DWG save, and known to b
     CHECK(paperSpaceCount(reopened, QStringLiteral("*Paper_Space0")) == 0);
 }
 
+TEST_CASE("The viewports of the layouts, which LibreCAD does not read, are said to be left out",
+          "[dxf][paper-space]") {
+    REQUIRE(lc::test::ensureSettings());
+    lc::test::QuietLog quiet;
+    lc::test::OutputDirectory directory("lc_dxf_paper_space_viewports");
+    std::string text = layoutsDxf();
+    const std::string anchor = "0\nTEXT\n5\n53\n";
+    const auto at = text.find(anchor);
+    REQUIRE(at != std::string::npos);
+    text.insert(at, "0\nVIEWPORT\n5\n55\n330\n1E\n100\nAcDbEntity\n67\n1\n8\n0\n100\nAcDbViewport\n"
+                    "10\n210.0\n20\n148.0\n30\n0.0\n40\n420.0\n41\n297.0\n68\n1\n69\n1\n");
+    const auto source = directory.file("viewport.dxf");
+    writeText(source, text);
+
+    CommandLine commandLine;
+    RS_Graphic graphic;
+    graphic.setReportsImportNotices(true);
+    REQUIRE(lc::test::importDrawing(graphic, source, RS2::FormatDXFRW));
+    CHECK(graphic.paperSpaces().viewportsNotRead() == 1);
+    REQUIRE(commandLine.messages.size() == 1);
+    CHECK(commandLine.messages.front().contains(
+        QStringLiteral("they are kept and saved with the drawing, except their 1 viewport(s), as DWG")));
+
+    const auto saved = directory.file("saved_r2018.dxf");
+    RS_FilterDXFRW writer;
+    REQUIRE(writer.fileExport(graphic, lc::test::toQString(saved), RS2::FormatDXFRW2018));
+    CHECK(writer.exportReport().contains(
+        QStringLiteral("1 viewport(s) of the layouts, which LibreCAD does not read")));
+}
+
 TEST_CASE("A layer a deleted layout entity is on stays, for an undo to restore it",
           "[dxf][paper-space]") {
     REQUIRE(lc::test::ensureSettings());

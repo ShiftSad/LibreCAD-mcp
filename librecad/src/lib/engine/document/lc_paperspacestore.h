@@ -105,11 +105,17 @@ public:
      *  included: an undo may restore those, on that layer. */
     unsigned countOnLayer(const QString& layerName) const;
 
+    /** Number of VIEWPORT entities the layouts of the file read had. LibreCAD
+     *  reads none of them, and a save writes the layouts without them. */
+    unsigned viewportsNotRead() const { return m_viewportsNotRead; }
+    void noteViewportNotRead() { ++m_viewportsNotRead; }
+
 private:
     Space* findSpace(const QString& name);
 
     RS_EntityContainer* m_document = nullptr;
     std::vector<Space> m_spaces;
+    unsigned m_viewportsNotRead = 0;
 };
 
 #endif

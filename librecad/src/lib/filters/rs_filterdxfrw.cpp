@@ -5235,7 +5235,8 @@ void RS_FilterDXFRW::finishPaperSpaceImport() {
 
   // An XREF shows its model space only: what its layouts hold stays behind
   // with the drawing it was read into, unannounced.
-  if (m_xrefStack.size() > 1 || paperSpaces.isEmpty())
+  const int viewports = static_cast<int>(paperSpaces.viewportsNotRead());
+  if (m_xrefStack.size() > 1 || (paperSpaces.isEmpty() && viewports == 0))
     return;
 
   const auto &metadata = m_graphic->dwgAdvancedMetadata();
@@ -5352,21 +5353,48 @@ void RS_FilterDXFRW::finishPaperSpaceImport() {
   // Objects, not entities: what LibreCAD reads as one entity a file may hold
   // as several records, and the other way round.
   const int hidden = static_cast<int>(paperSpaces.count());
-  if (hidden > 0 && !onOtherLayouts) {
+  // LibreCAD reads no VIEWPORT (addViewport()): the layouts are kept and
+  // saved without theirs.
+  if (hidden > 0 && !onOtherLayouts && viewports == 0) {
     // The active layout's paper space: every DWG and DXF version holds it.
     report(QObject::tr("%n object(s) on paper-space layouts (%1) are not "
                        "shown in model space; they are kept and saved with "
                        "the drawing.",
                        "RS_FilterDXFRW", hidden)
                .arg(names.join(QStringLiteral(", "))));
-  } else if (hidden > 0) {
+  } else if (hidden > 0 && !onOtherLayouts) {
+    report(QObject::tr("%n object(s) on paper-space layouts (%1) are not "
+                       "shown in model space; they are kept and saved with "
+                       "the drawing, except their %2 viewport(s).",
+                       "RS_FilterDXFRW", hidden)
+               .arg(names.join(QStringLiteral(", ")))
+               .arg(viewports));
+  } else if (hidden > 0 && viewports == 0) {
     report(QObject::tr("%n object(s) on paper-space layouts (%1) are not "
                        "shown in model space; they are kept and saved with "
                        "the drawing as DWG or as DXF R2000 or later (a DXF "
                        "R12 or R14 file holds the active layout only).",
                        "RS_FilterDXFRW", hidden)
                .arg(names.join(QStringLiteral(", "))));
+  } else if (hidden > 0) {
+    report(QObject::tr("%n object(s) on paper-space layouts (%1) are not "
+                       "shown in model space; they are kept and saved with "
+                       "the drawing, except their %2 viewport(s), as DWG or "
+                       "as DXF R2000 or later (a DXF R12 or R14 file holds "
+                       "the active layout only).",
+                       "RS_FilterDXFRW", hidden)
+               .arg(names.join(QStringLiteral(", ")))
+               .arg(viewports));
+  } else {
+    report(QObject::tr("%n viewport(s) on paper-space layouts are not read; "
+                       "a save writes the layouts without them.",
+                       "RS_FilterDXFRW", viewports));
   }
+}
+
+void RS_FilterDXFRW::addViewport([[maybe_unused]] const DRW_Viewport &data) {
+  if (m_graphic != nullptr)
+    m_graphic->paperSpaces().noteViewportNotRead();
 }
 
 namespace {
@@ -11855,6 +11883,7 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
   m_shapeLeftOut.clear();
   m_paperSpaceEntitiesLeftOut = 0;
   m_paperSpaceLeftOutReason.clear();
+  m_viewportsLeftOut = g.paperSpaces().viewportsNotRead();
   m_dxfLayoutDictionaryHandles.clear();
   m_shapeExportDirectory = QFileInfo(file).absoluteDir().canonicalPath();
   m_exportAttribScaleDataLeftOut = 0;
@@ -11963,6 +11992,15 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
     prepareShapesForExport();
     if (m_writeFailed)
       return false;
+    // The OLE frames read are kept for a DXF save; a DWG save writes none.
+    for (const auto &frame : g.dwgAdvancedMetadata().ole2Frames()) {
+      if (!frame.payloadBytes.empty())
+        ++m_shapeLeftOut["OLE frame (a DWG save writes none)"];
+    }
+    for (const auto &frame : g.dwgAdvancedMetadata().oleFrames()) {
+      if (!frame.payloadTruncated && !frame.payloadTooLarge)
+        ++m_shapeLeftOut["OLE frame (a DWG save writes none)"];
+    }
     clearDwgWriteIdentity();
     m_dwgExportAdmissionPlan = {};
     m_dwgFieldWritePlan = {};
@@ -17792,6 +17830,11 @@ QString RS_FilterDXFRW::exportReport() const {
                          "RS_FilterDXFRW",
                          static_cast<int>(m_paperSpaceEntitiesLeftOut))
                  .arg(m_paperSpaceLeftOutReason);
+  }
+  if (m_viewportsLeftOut > 0) {
+    // Not read when the drawing was opened (addViewport()).
+    lines << QObject::tr("%n viewport(s) of the layouts, which LibreCAD does not read",
+                         "RS_FilterDXFRW", static_cast<int>(m_viewportsLeftOut));
   }
 #ifdef DWGSUPPORT
   if (m_lastDwgWriteSkipCounters.total() > 0) {
