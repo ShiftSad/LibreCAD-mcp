@@ -211,6 +211,19 @@ struct Api {
         }
         worker.join();
         settle();
+        // The real GUI runner's modal guard closes a dialog that a route shows
+        // before the watchdog can see it, and reports it in the answer: count
+        // those as dialogs too.
+        for (const QJsonValue& skipped : response.json.value(QStringLiteral("skipped_dialogs")).toArray()) {
+            const QJsonObject dialog = skipped.toObject();
+            modals.append(dialog.value(QStringLiteral("class")).toString() + QStringLiteral(": ")
+                          + dialog.value(QStringLiteral("title")).toString());
+        }
+        for (const auto& [key, value] : response.extraHeaders) {
+            if (key.compare("X-LibreCAD-Skipped-Dialogs", Qt::CaseInsensitive) == 0) {
+                modals.append(QStringLiteral("%1 dialog(s) closed while rendering").arg(QString::fromLatin1(value)));
+            }
+        }
         return response;
     }
 
