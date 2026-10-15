@@ -107,6 +107,17 @@ constexpr PreR13VertexLayout preR13VertexLayout(std::uint16_t opts) {
     };
 }
 
+/// Whether a pre-R13 entity record belongs to the paper space.
+///
+/// Bit 0x40 of the record's flag byte says only that an `extra` byte follows
+/// the common header (libredwg FLAG_R11_HAS_PSPACE); that byte may carry
+/// nothing more than extended entity data (EXTRA_R11_HAS_EED, 0x02). An
+/// entity of the paper space names the paper-space viewport it was drawn in:
+/// bit 0x04 of the extra byte (EXTRA_R11_HAS_VIEWPORT).
+constexpr bool preR13EntityInPaperSpace(std::uint8_t flag, std::uint8_t extra) {
+    return (flag & 0x40) != 0 && (extra & 0x04) != 0;
+}
+
 //! Class to read pre-R13 (R10/R11) DWG files
 /*!
 *  Reads the fixed pre-R13 container: file header section pointers, then the
@@ -134,6 +145,12 @@ public:
         return publishDeferredRawObjects(intfa, m_deferredRawObjects);
     }
 
+protected:
+    // Decode one entity at the current buffer position; always leaves the
+    // buffer at recStart+size. Returns false only on an unrecoverable desync.
+    // Protected so a unit test can feed it one record.
+    bool readEntityR11(DRW_Interface& intfa, std::uint32_t sectionEnd);
+
 private:
     // Section pointers from the file header (absolute file offsets).
     std::uint32_t m_entitiesStart = 0;
@@ -145,10 +162,6 @@ private:
 
     // Walk a flat entity sequence in [start,end) delivering each entity.
     bool readEntitySection(std::uint32_t start, std::uint32_t end, DRW_Interface& intfa);
-    // Decode one entity at the current buffer position; always leaves the
-    // buffer at recStart+size. Returns false only on an unrecoverable desync.
-    bool readEntityR11(DRW_Interface& intfa, std::uint32_t sectionEnd);
-
     // POLYLINE..VERTEX..SEQEND accumulate across consecutive records; the
     // POLYLINE opens this, each VERTEX appends, SEQEND delivers + clears it.
     std::unique_ptr<DRW_Polyline> m_curPoly;

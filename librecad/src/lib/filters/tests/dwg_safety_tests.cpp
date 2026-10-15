@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <fstream>
@@ -478,8 +479,12 @@ private:
 
 class DwgLegacyReaderProbe final : public dwgReaderR11 {
 public:
+    using dwgReaderR11::readEntityR11;
+
     explicit DwgLegacyReaderProbe(std::unique_ptr<dwgBuffer> buffer)
         : dwgReaderR11(std::move(buffer), nullptr) {}
+
+    void setVersionForTest(DRW::Version value) { version = value; }
 };
 
 class DwgAc1015FixtureReaderProbe final : public dwgReader15 {
@@ -16362,6 +16367,67 @@ TEST_CASE("DWG object handle must match its object-map key",
         &buffer, object, interface, &frameFailure));
     CHECK(frameFailure);
     CHECK(interface.unsupportedObjects.empty());
+}
+
+namespace {
+// One R11 LINE record: type, flag, size, then the common header -- layer,
+// opts, the extra byte that flag 0x40 announces, what that byte announces
+// (EED, a paper-space viewport) -- and the 3D body.
+std::vector<std::uint8_t> r11LineRecord(std::uint8_t extra) {
+    std::vector<std::uint8_t> body;
+    const auto put16 = [&body](std::uint16_t value) {
+        body.push_back(static_cast<std::uint8_t>(value & 0xFF));
+        body.push_back(static_cast<std::uint8_t>(value >> 8));
+    };
+    put16(0);      // layer index
+    put16(0);      // opts
+    body.push_back(extra);
+    if (extra & 0x02) {
+        put16(3);  // EED byte count
+        body.insert(body.end(), {0x01, 0x02, 0x03});
+    }
+    if (extra & 0x04)
+        put16(1);  // paper-space viewport
+    for (const double value : {1.0, 2.0, 0.0, 3.0, 4.0, 0.0}) {
+        std::uint8_t bytes[sizeof(double)];
+        std::memcpy(bytes, &value, sizeof(double));
+        body.insert(body.end(), bytes, bytes + sizeof(double));
+    }
+    std::vector<std::uint8_t> record{1 /* LINE */, 0x40 /* extra follows */};
+    const auto size = static_cast<std::uint16_t>(body.size() + 4);
+    record.push_back(static_cast<std::uint8_t>(size & 0xFF));
+    record.push_back(static_cast<std::uint8_t>(size >> 8));
+    record.insert(record.end(), body.begin(), body.end());
+    return record;
+}
+} // namespace
+
+TEST_CASE("DWG R11: only a paper-space viewport puts an entity in paper space",
+          "[dwg][safety][pre-r13]") {
+    CHECK_FALSE(preR13EntityInPaperSpace(0x40, 0x00));
+    CHECK_FALSE(preR13EntityInPaperSpace(0x40, 0x02));
+    CHECK_FALSE(preR13EntityInPaperSpace(0x00, 0x04));
+    CHECK(preR13EntityInPaperSpace(0x40, 0x04));
+    CHECK(preR13EntityInPaperSpace(0x40, 0x06));
+
+    // Flag 0x40 with EED only is a model-space entity with extended data.
+    const auto [extra, paper] = GENERATE(table<std::uint8_t, bool>(
+        {{std::uint8_t{0x02}, false}, {std::uint8_t{0x00}, false},
+         {std::uint8_t{0x04}, true}, {std::uint8_t{0x06}, true}}));
+    CAPTURE(static_cast<int>(extra));
+    std::vector<std::uint8_t> record = r11LineRecord(extra);
+    DwgLegacyReaderProbe reader(
+        std::make_unique<dwgBuffer>(record.data(), record.size()));
+    reader.setVersionForTest(DRW::AC1009);
+    DwgJournalLineProbe lines;
+    REQUIRE(reader.readEntityR11(lines,
+                                 static_cast<std::uint32_t>(record.size())));
+    REQUIRE(lines.lines.size() == 1);
+    // The extra byte and what it announces were read past: the body is read
+    // where the record has it.
+    CHECK(lines.lines.front().basePoint.x == 1.0);
+    CHECK(lines.lines.front().secPoint.y == 4.0);
+    CHECK((lines.lines.front().space == DRW::PaperSpace) == paper);
 }
 
 TEST_CASE("DWG legacy reader publishes deferred raw controls",
