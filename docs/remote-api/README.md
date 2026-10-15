@@ -215,7 +215,7 @@ a one-line summary.
 | Path parameters | Percent-encode them completely, for example a layer `A/B` as `/layers/A%2FB`. |
 | Success | A route-specific object, with no wrapper. It may add `warnings` (list of strings), `skipped_dialogs` and `cancelled_action` ([section 10](#10-dialogs-the-command-line-and-undo)). |
 | Undo | Answers that change a drawing say `"undoable": true` or `false`. |
-| Headers | Every answer has `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and `Connection: close`. A client may send `X-Request-Timeout-Ms: <ms>`, how long it waits for the answer: LibreCAD then stops waiting a little before it does ([section 11](#11-limits-and-timeouts)). |
+| Headers | Every answer has `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and `Connection: close`. A client may send `X-Request-Timeout-Ms: <ms>`, how long it waits for the answer: LibreCAD then stops waiting a little before it does ([section 11](#11-limits-and-timeouts)). The value is one whole number of milliseconds from 1 to 600000 (10 minutes); anything else (`0`, `700.5`, `1e3`, the header sent twice) is `400 bad_header`, so a client never believes it capped a wait that has no cap. |
 
 ## 7. Endpoints
 
@@ -293,8 +293,8 @@ read-only values such as `length` or `area`.
 | `ellipse` | `center`, `major_axis` (a vector), `ratio` in (0, 1], `start_angle_deg: 0`, `end_angle_deg: 360`, `reversed: false`. The angles are **parametric** (eccentric anomaly), counter-clockwise from `major_axis`, as DXF stores them: the point at `t` is `center + major_axis·cos t + minor_axis·sin t`. They are polar angles only for a circle-like `ratio` of 1. |
 | `point` | `position` |
 | `polyline` | `vertices: [[x, y] or [x, y, bulge], ...]` (at least 2), `closed: false`. A bulge under 1e-8 is a straight segment, in a polyline read from a DXF or DWG file too. |
-| `spline` | either `control_points` with `degree: 3` (1 to 3), or `fit_points`; `closed: false` |
-| `text` | `position`, `text`, `height` > 0, `angle_deg: 0`, `halign`, `valign`, `style: "standard"`, `width_factor: 1`; `second_point` (the end of the baseline) is required when `halign` is `aligned` or `fit` |
+| `spline` | either `control_points` with `degree: 3` (1 to 3), or `fit_points`; `closed: false`. Its `bbox` bounds the curve as LibreCAD draws it, not its control points. |
+| `text` | `position`, `text`, `height` > 0, `angle_deg: 0`, `halign`, `valign`, `style: "standard"`, `width_factor: 1`; `second_point` (the end of the baseline) is required when `halign` is `aligned` or `fit`. LibreCAD derives some fields for these alignments: `aligned` text takes its `height` (leave it out) and `angle_deg` from `position` and `second_point`, `fit` text its `angle_deg`; both stretch the text from `position` to `second_point`, so `width_factor` is not used; `aligned`, `fit` and `middle` text sit on the baseline (`valign` is `baseline`). A value LibreCAD would not keep is refused (`422 invalid_entity` naming the field): move `second_point` instead. The values `GET` reports pass, so sending an entity back unchanged works. |
 | `mtext` | `position`, `text`, `height` > 0, `width: 0`, `angle_deg: 0`, `attachment`, `line_spacing: 1`, `style` |
 | `dimension` | `dim_type`: `linear` (`p1`, `p2`, `line_point`, `angle_deg`), `aligned`, `radial`, `diametric` or `angular`; `text` (empty = measured value) |
 | `hatch` | `pattern: "SOLID"`, `scale: 1`, `angle_deg: 0`, and `boundary` (point loops) or `boundary_ids` (closed entities) |
@@ -343,7 +343,7 @@ means more than 5000 entities or ids in one request.
 
 | HTTP | Tokens |
 |---|---|
-| 400 | `bad_request`, `invalid_json`, `body_must_be_object`, `unknown_field`, `missing_param`, `bad_param`, `bad_path` (also a path with a control character) |
+| 400 | `bad_request`, `invalid_json`, `body_must_be_object`, `unknown_field`, `missing_param`, `bad_param`, `bad_path` (also a path with a control character), `bad_header` (an `X-Request-Timeout-Ms` that is not a whole number of milliseconds from 1 to 600000; with `header`, `min`, `max`) |
 | 401 | `unauthorized` |
 | 403 | `origin_not_allowed`, `path_not_allowed`, `commands_disabled` |
 | 404 | `not_found` (route), `unknown_document`, `unknown_entity`, `unknown_layer`, `unknown_block`, `unknown_view`, `file_not_found` |
@@ -392,7 +392,9 @@ request answers `504 ui_timeout`. With `"started": false` nothing was done; with
 may still finish afterwards, and the command history then says `[MCP] ... finished after the
 client gave up`. Check with `/documents` or `/entities` before repeating it. A request whose
 client has given up (closed the connection, or passed its `X-Request-Timeout-Ms`) before
-LibreCAD got to it never runs at all. Autosave waits while a request is running.
+LibreCAD got to it never runs at all. One exception: an HTTP/1.0 client that closes its connection
+looks the same as one that only ends its sending and still reads (section 11), so its request
+still runs; send HTTP/1.1, or a deadline, to be sure. Autosave waits while a request is running.
 
 ## 11. Limits and timeouts
 
@@ -403,7 +405,8 @@ LibreCAD got to it never runs at all. Autosave waits while a request is running.
 | `Transfer-Encoding: chunked` | refused | `411 length_required` |
 | request line and headers arriving | 5 s | `408 request_timeout` |
 | reading the whole request | 15 s | `408 request_timeout` |
-| connections served at the same time | 16 | `503 server_busy` |
+| requests past their headers at the same time | 16 | `503 server_busy` |
+| connections still sending their headers | 64 | the oldest with nothing waiting to be read is closed (`408`) |
 | entities per `POST /entities`, ids per request | 5000 | `422 too_many` |
 | `GET /entities` page | 1000 | |
 | render size | 64 to 4096 pixels per side | |
@@ -416,8 +419,9 @@ LibreCAD got to it never runs at all. Autosave waits while a request is running.
 | `/render`, `/command` | 30 s |
 | new, open, save, save as, export | 120 s |
 
-A client's `X-Request-Timeout-Ms` header caps these: LibreCAD stops waiting at the client's
-deadline (counted from when the request arrived) and answers `504 ui_timeout`, so the client hears
+A client's `X-Request-Timeout-Ms` header (1 to 600000 ms, a whole number; anything else is
+`400 bad_header`) caps these: LibreCAD stops waiting at the client's deadline (counted from when
+the request headers arrived) and answers `504 ui_timeout`, so the client hears
 whether the work started instead of timing out blind. That holds for a request still waiting for
 its turn behind a slow one too: it is answered at its deadline with `"started": false` and never
 runs. Without the header, a request waits for its turn. The MCP server waits 30 s per call (50 s
@@ -426,18 +430,26 @@ about a minute) and sends its deadline less a margin of up to 2 s.
 
 Connections:
 
-- Each connection is read on its own and requests run one at a time, in the order they arrive.
-- The token, `Host` and `Origin` are checked as soon as the headers are in: a client without the
-  token is answered at once and never gets to send its body.
-- When all 16 connections are busy, the oldest one that has not sent its headers yet is closed
-  (`408`) to make room for the new one; only when all 16 are past their headers is the new one
-  answered `503 server_busy`. A refused connection is read for up to a second before it is
-  closed, so the client reads the refusal instead of a reset.
+- LibreCAD reads every connection itself until the request headers are in, so a connection that
+  sends nothing, or sends slowly, takes no thread. A request past its headers gets a reader of its
+  own, and requests run one at a time, in the order they arrive.
+- The token, `Host`, `Origin` and `X-Request-Timeout-Ms` are checked as soon as the headers are
+  in: a client without the token is answered at once and never gets to send its body.
+- At most 16 requests are past their headers at the same time; one more is answered
+  `503 server_busy` at once ("retry in a moment"). At most 64 connections may still be sending
+  their headers; when one more arrives, the oldest of them that has nothing waiting to be read is
+  closed (`408`) to make room, so idle connections from another program cannot lock the real
+  client out, and a request already sent is never taken for an idle one. A refused connection is
+  read for up to a second before it is closed, so the client reads the refusal instead of a reset.
 - A client may end its sending after the request (a half-close, as `ncat` or `socat` do, or
   `shutdown(SHUT_WR)`): it still gets the answer. LibreCAD then sends an HTTP/1.1 client an interim
-  `HTTP/1.1 100 Continue` first, which a client that really closed its socket answers with a reset:
-  that is how LibreCAD tells a client that gave up (its waiting request is dropped) from one that
-  still reads. HTTP clients skip interim answers; HTTP/1.0 requests get none.
+  `HTTP/1.1 100 Continue`, and again every second while the request waits, which a client that
+  really closed its socket answers with a reset: that is how LibreCAD tells a client that gave up
+  (its waiting request is dropped) from one that still reads, also when it closes only after
+  reading the first interim answer, as relays do. HTTP clients skip interim answers.
+- HTTP/1.0 requests get no interim answer, so LibreCAD cannot tell an HTTP/1.0 client that closed
+  its connection from one that half-closed: its request still runs, and the answer goes to a
+  client that may be gone.
 
 ## 12. Security model
 
@@ -455,7 +467,7 @@ a password. The rules:
 4. **File paths** for open, save-as and export must be absolute, without control characters (a
    NUL would cut the name the system opens: `run.bat\0.dxf` writes `run.bat`) and, on Windows,
    without a `:` after the drive (`host.txt:x.pdf` is a hidden stream of `host.txt`; on a share
-   too) or a device name such as `COM1.dxf` or `NUL.svg`; they are
+   too) or a device name such as `COM1.dxf`, `COM¹.dxf` or `NUL.svg`; they are
    normalized first. Network paths (`\\server\share`, `//host`) are refused unless you allow
    them, because opening one can send your Windows credentials to that server. Device-namespace
    paths (`\\?\C:\...`, `\\.\...`) are always refused (`403 path_not_allowed`): write
@@ -463,8 +475,13 @@ a password. The rules:
    (`403 path_not_allowed`), checked after resolving symbolic links and, on Windows, directory
    junctions and mount points, at any path length, so no link inside an allowed folder leads out
    of it; a path whose links cannot be resolved is refused. The file
-   extension must match the format, an existing file is never replaced without `"overwrite": true`
-   (`409 file_exists`), and a file open in another LibreCAD window is never written.
+   extension must match the format; for an existing file, the extension of its own name too (on
+   Windows `KEEPME~1.DXF` can be the short name of `keepme.dxfold`, and a symbolic link names its
+   target), so a write never replaces a file of another type (`422 extension_mismatch`, with
+   `resolved`). An existing file is never replaced without `"overwrite": true`
+   (`409 file_exists`), and a file open in another LibreCAD window is never written, under any of
+   its names: a junction, a symbolic link, a short name or a hard link that leads to it counts as
+   the same file (`409 file_open_in_other_window`).
 5. **Destructive actions need an explicit flag**: `discard_changes` to close a modified drawing,
    an `entities` policy to delete a layer that has entities, `overwrite` to replace a file. The MCP
    server also asks you before it sets them.
@@ -507,7 +524,8 @@ computers.
 | `504 ui_timeout` | LibreCAD was busy. Check with `/documents` or `/entities` whether the change happened before repeating it. |
 | `403 path_not_allowed` | The path is outside the folders allowed in the Remote API tab (or in `LIBRECAD_MCP_ALLOWED_ROOTS`), a network path, or a `\\?\` / `\\.\` path (write `C:\...`). |
 | `403 commands_disabled` | Turn on "Allow running command-line commands". |
-| `422 invalid_entity` on text | `aligned` and `fit` text need `second_point`. If the error names `style`, LibreCAD found no font at all; check Options > Application Preferences > Paths (an unknown style name alone only adds a warning: LibreCAD uses another font). |
+| `400 bad_header` | The client sent an `X-Request-Timeout-Ms` that is not a whole number of milliseconds from 1 to 600000 (or sent it twice). |
+| `422 invalid_entity` on text | `aligned` and `fit` text need `second_point`; they take their angle (`aligned` text its height too) from it and sit on the baseline, so leave `height`, `angle_deg`, `width_factor` and `valign` out and move `second_point` instead. If the error names `style`, LibreCAD found no font at all; check Options > Application Preferences > Paths (an unknown style name alone only adds a warning: LibreCAD uses another font). |
 | `404 not_found` on a route the docs list | The LibreCAD build is older than the MCP server; compare `capabilities` in `/status`. |
 
 The end-to-end test in [`tools/remote-api/`](../../tools/remote-api/README.md) exercises every
