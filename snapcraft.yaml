@@ -1,4 +1,4 @@
-name: librecad
+name: librecad-mcp   # librecad-mcp: was librecad (installs beside the upstream snap)
 version: '2.2.2-alpha'
 grade: stable
 base: core24
@@ -20,6 +20,7 @@ apps:
     command: usr/bin/librecad
     plugs:
       - home
+      - network-bind   # librecad-mcp: the Remote API listens on 127.0.0.1
       - desktop
       - desktop-legacy
       - opengl

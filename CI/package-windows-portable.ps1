@@ -115,9 +115,12 @@ try {
         '',
         'Documentation: https://github.com/ShiftSad/LibreCAD-mcp/blob/master/docs/remote-api/README.md',
         'Problems with this build: https://github.com/ShiftSad/LibreCAD-mcp/issues',
-        'Upstream LibreCAD: https://librecad.org (GPL-2.0-or-later, see LICENSE in the source)'
+        'Upstream LibreCAD: https://librecad.org',
+        'License: GPL-2.0-or-later; the full text is in LICENSE.txt.'
     )
     [IO.File]::WriteAllText((Join-Path $top 'README-LibreCAD-mcp.txt'), (($readme -join "`r`n") + "`r`n"))
+    # The GPL travels with the binaries (the installer shows the same file).
+    Copy-Item -LiteralPath (Join-Path $repo 'licenses\gpl-2.0.txt') -Destination (Join-Path $top 'LICENSE.txt')
 
     # 5. The zip.
     $zip = Join-Path $OutDir "$baseName.zip"

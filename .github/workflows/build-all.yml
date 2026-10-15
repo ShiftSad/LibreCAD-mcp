@@ -349,6 +349,8 @@ jobs:
         run: |
           cd "${{ github.workspace }}"
           powershell.exe -ExecutionPolicy Bypass -File scripts\generate-custom-nsh.ps1 -Architecture AMD64 -OutputPath "scripts\postprocess-windows\custom.nsh"
+          echo !define LC_MCP>> scripts\postprocess-windows\custom.nsh
+          rem librecad-mcp: the installer installs LibreCAD-mcp beside upstream LibreCAD (nsis-msvc.nsi)
 
           cd generated
           windeployqt6.exe --release --compiler-runtime Release\LibreCAD.exe
@@ -477,6 +479,8 @@ jobs:
         run: |
           cd "${{ github.workspace }}"
           powershell.exe -ExecutionPolicy Bypass -File scripts\generate-custom-nsh.ps1 -Architecture ARM64 -OutputPath "scripts\postprocess-windows\custom.nsh"
+          echo !define LC_MCP>> scripts\postprocess-windows\custom.nsh
+          rem librecad-mcp: the installer installs LibreCAD-mcp beside upstream LibreCAD (nsis-msvc.nsi)
 
           cd generated
           windeployqt6.exe --release --compiler-runtime ARM64\Release\LibreCAD.exe

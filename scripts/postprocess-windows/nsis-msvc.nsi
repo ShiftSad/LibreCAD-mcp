@@ -25,6 +25,29 @@ SetCompressor /SOLID lzma
     !endif
 !endif
 ;--------------------------------
+; librecad-mcp: the installed program's identity. LibreCAD-mcp builds define LC_MCP (build-all.yml
+; adds it to custom.nsh), so the fork installs beside upstream LibreCAD (its own folder, uninstall
+; entry, registry key, shortcuts and file types) and never over it. Upstream's values otherwise.
+!ifdef LC_MCP
+    !define APPNAME "LibreCAD-mcp"
+    !define LC_INSTALL_FOLDER "LibreCAD-mcp"
+    !define LC_REG_NAME "LibreCAD-mcp"
+    !define LC_PROGID "LibreCAD-mcp"
+    !define LC_PUBLISHER "LibreCAD-mcp contributors"
+!endif
+!ifndef LC_INSTALL_FOLDER
+    !define LC_INSTALL_FOLDER "LibreCAD"
+!endif
+!ifndef LC_REG_NAME
+    !define LC_REG_NAME "LibreCAD"
+!endif
+!ifndef LC_PROGID
+    !define LC_PROGID "LibreCAD"
+!endif
+!ifndef LC_PUBLISHER
+    !define LC_PUBLISHER "LibreCAD Team"
+!endif
+;--------------------------------
 ; Basic definitions
 !ifndef APPNAME
     !define APPNAME "LibreCAD"
@@ -36,20 +59,20 @@ SetCompressor /SOLID lzma
 ; /DAMD64 or /DARM64 passed by build-windows.bat; default is x86
 !ifdef AMD64
     !define ARCH_SUFFIX "x64"
-    !define INSTALL_DIR "$PROGRAMFILES64\LibreCAD"
+    !define INSTALL_DIR "$PROGRAMFILES64\${LC_INSTALL_FOLDER}" ; librecad-mcp: was LibreCAD
     !define REG_VIEW 64
 !else ifdef ARM64
     !define ARCH_SUFFIX "arm64"
-    !define INSTALL_DIR "$PROGRAMFILES64\LibreCAD"
+    !define INSTALL_DIR "$PROGRAMFILES64\${LC_INSTALL_FOLDER}" ; librecad-mcp: was LibreCAD
     !define REG_VIEW 64
 !else
     !define ARCH_SUFFIX "x86"
-    !define INSTALL_DIR "$PROGRAMFILES\LibreCAD"
+    !define INSTALL_DIR "$PROGRAMFILES\${LC_INSTALL_FOLDER}" ; librecad-mcp: was LibreCAD
     !define REG_VIEW 32
 !endif
 ; Per-architecture registry paths — allows x64 and ARM64 to coexist
-!define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\LibreCAD-${ARCH_SUFFIX}"
-!define APPREG    "Software\LibreCAD\${ARCH_SUFFIX}"
+!define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LC_REG_NAME}-${ARCH_SUFFIX}" ; librecad-mcp: was LibreCAD
+!define APPREG    "Software\${LC_REG_NAME}\${ARCH_SUFFIX}" ; librecad-mcp: was LibreCAD
 ;--------------------------------
 ; General - Dynamic output filename with version and architecture
 Name "${APPNAME} ${SCMREVISION}"
@@ -65,7 +88,7 @@ VIAddVersionKey "ProductName" "${APPNAME}"
 VIAddVersionKey "FileVersion" "${SCMREVISION}"
 VIAddVersionKey "ProductVersion" "${SCMREVISION}"
 VIAddVersionKey "FileDescription" "${APPNAME} Installer"
-VIAddVersionKey "LegalCopyright" "LibreCAD Team"
+VIAddVersionKey "LegalCopyright" "${LC_PUBLISHER}" ; librecad-mcp: was LibreCAD Team
 ;--------------------------------
 ; Interface
 !define MUI_ABORTWARNING
@@ -183,7 +206,7 @@ Section "Main Section" SecMain
   WriteRegStr HKLM "${UNINSTKEY}" "DisplayName" "${APPNAME} ${SCMREVISION} (${ARCH_SUFFIX})"
   WriteRegStr HKLM "${UNINSTKEY}" "DisplayIcon" "$INSTDIR\librecad.ico"
   WriteRegStr HKLM "${UNINSTKEY}" "DisplayVersion" "${SCMREVISION}"
-  WriteRegStr HKLM "${UNINSTKEY}" "Publisher" "LibreCAD Team"
+  WriteRegStr HKLM "${UNINSTKEY}" "Publisher" "${LC_PUBLISHER}" ; librecad-mcp: was LibreCAD Team
   WriteRegStr HKLM "${UNINSTKEY}" "URLInfoAbout" "https://librecad.org"
   WriteRegStr HKLM "${UNINSTKEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "${UNINSTKEY}" "UninstallString" "$INSTDIR\Uninstall.exe"
@@ -198,14 +221,15 @@ Section "Associate .dxf and .dwg files" SecAssoc
   ; ── .dxf ──────────────────────────────────────────────────────────────────
   ; Back up existing association if not already ours
   ReadRegStr $R0 HKCR ".dxf" ""
-  ${If} $R0 != "LibreCAD.DXF"
+  ; librecad-mcp: was LibreCAD.DXF
+  ${If} $R0 != "${LC_PROGID}.DXF"
     WriteRegStr HKLM "${APPREG}" "OldDXFAssoc" $R0
   ${EndIf}
   ClearErrors
-  WriteRegStr HKCR ".dxf"                         "" "LibreCAD.DXF"
-  WriteRegStr HKCR "LibreCAD.DXF"                 "" "AutoCAD DXF Drawing"
-  WriteRegStr HKCR "LibreCAD.DXF\DefaultIcon"     "" "$INSTDIR\librecad.ico,0"
-  WriteRegStr HKCR "LibreCAD.DXF\shell\open\command" "" '"$INSTDIR\LibreCAD.exe" "%1"'
+  WriteRegStr HKCR ".dxf"                         "" "${LC_PROGID}.DXF" ; librecad-mcp: was LibreCAD.DXF
+  WriteRegStr HKCR "${LC_PROGID}.DXF"                 "" "AutoCAD DXF Drawing" ; librecad-mcp: was LibreCAD.DXF
+  WriteRegStr HKCR "${LC_PROGID}.DXF\DefaultIcon"     "" "$INSTDIR\librecad.ico,0" ; librecad-mcp: was LibreCAD.DXF
+  WriteRegStr HKCR "${LC_PROGID}.DXF\shell\open\command" "" '"$INSTDIR\LibreCAD.exe" "%1"' ; librecad-mcp: was LibreCAD.DXF
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONEXCLAMATION "Failed to set .dxf file association!"
     Abort
@@ -214,14 +238,15 @@ Section "Associate .dxf and .dwg files" SecAssoc
   ; ── .dwg ──────────────────────────────────────────────────────────────────
   ; Back up existing association if not already ours
   ReadRegStr $R0 HKCR ".dwg" ""
-  ${If} $R0 != "LibreCAD.DWG"
+  ; librecad-mcp: was LibreCAD.DWG
+  ${If} $R0 != "${LC_PROGID}.DWG"
     WriteRegStr HKLM "${APPREG}" "OldDWGAssoc" $R0
   ${EndIf}
   ClearErrors
-  WriteRegStr HKCR ".dwg"                         "" "LibreCAD.DWG"
-  WriteRegStr HKCR "LibreCAD.DWG"                 "" "AutoCAD DWG Drawing"
-  WriteRegStr HKCR "LibreCAD.DWG\DefaultIcon"     "" "$INSTDIR\librecad.ico,0"
-  WriteRegStr HKCR "LibreCAD.DWG\shell\open\command" "" '"$INSTDIR\LibreCAD.exe" "%1"'
+  WriteRegStr HKCR ".dwg"                         "" "${LC_PROGID}.DWG" ; librecad-mcp: was LibreCAD.DWG
+  WriteRegStr HKCR "${LC_PROGID}.DWG"                 "" "AutoCAD DWG Drawing" ; librecad-mcp: was LibreCAD.DWG
+  WriteRegStr HKCR "${LC_PROGID}.DWG\DefaultIcon"     "" "$INSTDIR\librecad.ico,0" ; librecad-mcp: was LibreCAD.DWG
+  WriteRegStr HKCR "${LC_PROGID}.DWG\shell\open\command" "" '"$INSTDIR\LibreCAD.exe" "%1"' ; librecad-mcp: was LibreCAD.DWG
   ${If} ${Errors}
     MessageBox MB_OK|MB_ICONEXCLAMATION "Failed to set .dwg file association!"
     Abort
@@ -238,9 +263,10 @@ Section "Uninstall"
   RMDir /r "$SMPROGRAMS\${APPNAME}"
   RMDir /r "$INSTDIR"
   ; ── Restore .dxf association ────────────────────────────────────────────────
-  DeleteRegKey HKCR "LibreCAD.DXF"
+  DeleteRegKey HKCR "${LC_PROGID}.DXF" ; librecad-mcp: was LibreCAD.DXF
   ReadRegStr $R0 HKCR ".dxf" ""
-  ${If} $R0 == "LibreCAD.DXF"
+  ; librecad-mcp: was LibreCAD.DXF
+  ${If} $R0 == "${LC_PROGID}.DXF"
     ReadRegStr $R1 HKLM "${APPREG}" "OldDXFAssoc"
     ${If} $R1 == ""
       DeleteRegKey HKCR ".dxf"
@@ -250,9 +276,10 @@ Section "Uninstall"
   ${EndIf}
 
   ; ── Restore .dwg association ────────────────────────────────────────────────
-  DeleteRegKey HKCR "LibreCAD.DWG"
+  DeleteRegKey HKCR "${LC_PROGID}.DWG" ; librecad-mcp: was LibreCAD.DWG
   ReadRegStr $R0 HKCR ".dwg" ""
-  ${If} $R0 == "LibreCAD.DWG"
+  ; librecad-mcp: was LibreCAD.DWG
+  ${If} $R0 == "${LC_PROGID}.DWG"
     ReadRegStr $R1 HKLM "${APPREG}" "OldDWGAssoc"
     ${If} $R1 == ""
       DeleteRegKey HKCR ".dwg"
