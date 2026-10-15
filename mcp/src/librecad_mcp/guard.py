@@ -76,12 +76,20 @@ def _is_network(p: str, windows: bool) -> bool:
     return p.startswith("//")
 
 
+def _is_device_namespace(p: str) -> bool:
+    """``\\\\?\\``, ``\\\\.\\`` or ``\\??\\`` (any slashes): Windows device-namespace names. Through them a
+    local file skips the drive and stream rules; they are not network shares."""
+    q = p.replace("/", "\\")
+    return q.startswith(("\\\\?\\", "\\\\.\\", "\\??\\"))
+
+
 def check_path(path: str, kind: PathKind, fmt: str | None = None, *, windows: bool | None = None,
                env: Mapping[str, str] | None = None, roots: list[str] | None = None) -> str:
     """Check a file path before it is sent to LibreCAD and return it normalized.
 
-    Rules: an absolute local path; no network (UNC, ``\\\\?\\``, ``//host``) path unless
-    LIBRECAD_MCP_ALLOW_NETWORK_PATHS=1; inside LIBRECAD_MCP_ALLOWED_ROOTS when that is set; an
+    Rules: an absolute local path; no network (UNC, ``//host``) path unless
+    LIBRECAD_MCP_ALLOW_NETWORK_PATHS=1, and never a device-namespace one (``\\\\?\\``, ``\\\\.\\``); no
+    ``:`` after the drive (an alternate data stream); inside LIBRECAD_MCP_ALLOWED_ROOTS when that is set; an
     extension matching the format (``kind="open"``: a file type LibreCAD opens). Raises
     BlockedByPolicy otherwise. ``windows``, ``env`` and ``roots`` exist for tests.
     """
@@ -104,6 +112,11 @@ def check_path(path: str, kind: PathKind, fmt: str | None = None, *, windows: bo
         raise BlockedByPolicy("bad_path", "'~' is not expanded on the LibreCAD side",
                               "Pass the full absolute path, for example from the user's home folder.", path)
 
+    if windows and _is_device_namespace(p):
+        # Never allowed, not even with LIBRECAD_MCP_ALLOW_NETWORK_PATHS: LibreCAD refuses them too.
+        raise BlockedByPolicy(
+            "device_path", "device namespace paths (\\\\?\\, \\\\.\\, \\??\\) are refused",
+            "Write the path as C:\\folder\\file (or \\\\server\\share\\... for a share the user allowed).", path)
     if _is_network(p, windows):
         if not env_flag("LIBRECAD_MCP_ALLOW_NETWORK_PATHS", env):
             raise BlockedByPolicy(
@@ -111,6 +124,9 @@ def check_path(path: str, kind: PathKind, fmt: str | None = None, *, windows: bo
                 "Use a path on a local drive. Network paths can leak Windows credentials to the "
                 "server; the user can allow them with LIBRECAD_MCP_ALLOW_NETWORK_PATHS=1 and in "
                 "LibreCAD's Preferences > Remote API (MCP).", path)
+        if windows and ":" in p[2:]:
+            raise BlockedByPolicy("bad_path", "':' is not allowed in a network path",
+                                  "Remove the ':' (alternate data streams are not files).", path)
     elif windows:
         drive, rest = ntpath.splitdrive(p)
         if len(drive) != 2 or drive[1] != ":" or not drive[0].isalpha() or not rest.startswith(("\\", "/")):

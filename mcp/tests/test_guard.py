@@ -43,8 +43,8 @@ def test_windows_path_is_normalized():
     (r"C:\a\\", "bad_path"),
     (r"\\server\share\plan.dxf", "network_path"),
     ("//server/share/plan.dxf", "network_path"),
-    (r"\\?\C:\a\plan.dxf", "network_path"),
-    (r"\\.\PhysicalDrive0", "network_path"),
+    (r"\\?\C:\a\plan.dxf", "device_path"),
+    (r"\\.\PhysicalDrive0", "device_path"),
 ])
 def test_windows_refusals(path, why):
     assert reason(path, windows=True, env={}) == why
@@ -54,6 +54,19 @@ def test_network_paths_need_the_explicit_opt_in():
     env = {"LIBRECAD_MCP_ALLOW_NETWORK_PATHS": "1"}
     assert check_path(r"\\server\share\plan.dxf", "open", windows=True, env=env)
     assert reason(r"\\server\share\plan.dxf", windows=True, env={"LIBRECAD_MCP_ALLOW_NETWORK_PATHS": "${x}"}) == "network_path"
+
+
+@pytest.mark.parametrize("path", [r"\\?\C:\a\host.txt:x.pdf", r"\\.\C:\a\host.txt:x.pdf", "//?/C:/a/host.txt:x.pdf",
+                                  r"\??\C:\a\plan.pdf", r"\\?\C:\a\plan.pdf", r"\\?\UNC\server\share\plan.pdf"])
+def test_device_namespace_paths_are_refused_even_when_network_paths_are_allowed(path):
+    # a local file through \\?\ would skip the drive and stream rules (LibreCAD refuses these too)
+    assert reason(path, "export", "pdf", windows=True, env={"LIBRECAD_MCP_ALLOW_NETWORK_PATHS": "1"}) == "device_path"
+
+
+def test_a_stream_on_a_share_is_refused():
+    env = {"LIBRECAD_MCP_ALLOW_NETWORK_PATHS": "1"}
+    assert reason(r"\\server\share\host.txt:x.pdf", "export", "pdf", windows=True, env=env) == "bad_path"
+    assert check_path(r"\\server\share\plan.pdf", "export", "pdf", windows=True, env=env)
 
 
 def test_windows_allowed_roots_are_case_insensitive_and_not_prefix_tricks():
