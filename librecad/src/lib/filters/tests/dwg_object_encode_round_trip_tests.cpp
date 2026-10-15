@@ -8191,6 +8191,121 @@ TEST_CASE("DRW_Dictionary rejects a body that crosses its AC1027 boundary",
     CHECK(rejected.m_entries.empty());
 }
 
+// AutoCAD 2018+ (AC1032) writes dictionary pairs whose item handle is null:
+// ACAD_PARALLEL_BACKGROUND in a viewport extension dictionary with no
+// background, and empty-named slots left by erased entries. The encoder cannot
+// produce them, so the frame is assembled by hand in the R2013+ layout.
+TEST_CASE("DRW_Dictionary drops AC1032 entries with a null item handle",
+          "[dwg-read][object-encode][dictionary][r2018]") {
+    const DRW::Version version = DRW::AC1032;
+    struct Item {
+        std::string name;
+        std::uint64_t handle;
+    };
+    const auto emit = [version](int hardOwner, const std::vector<Item>& items,
+                                std::uint32_t& handleBits) {
+        dwgBufferW data;
+        dwgBufferW strings;
+        dwgBufferW handles;
+        emitObjectPreamble(data, version, /*oType=*/42, /*handle=*/0x1C4A4,
+                           /*numReactors=*/0, /*xDictFlag=*/1);
+        data.putBit(0); // has_ds_data (R2013+ common object data)
+        data.putBitLong(static_cast<std::int32_t>(items.size()));
+        data.putBitShort(1); // cloning
+        data.putRawChar8(static_cast<std::uint8_t>(hardOwner));
+        for (const Item& item : items)
+            strings.putVariableText(version, item.name);
+        emitCommonHandlePrefix(handles, /*parentHandle=*/0xC, {},
+                               /*xDictFlag=*/1);
+        for (const Item& item : items) {
+            // AutoCAD keeps the soft-owner code on null items, even when the
+            // dictionary hard-owns its members.
+            dwgHandle itemHandle;
+            itemHandle.code = DRW::DwgSoftOwnership;
+            itemHandle.ref = static_cast<std::uint32_t>(item.handle);
+            itemHandle.ref64 = item.handle;
+            handles.putHandle(itemHandle);
+        }
+
+        data.alignToByte();
+        strings.alignToByte();
+        const std::uint32_t stringBytes =
+            static_cast<std::uint32_t>(strings.data().size());
+        if (stringBytes != 0)
+            data.putBytes(strings.data().data(), stringBytes);
+        for (int i = 0; i < 7; ++i)
+            data.putBit(0);
+        const std::uint32_t stringBitSize = stringBytes * 8u + 7u;
+        data.putRawShort16(static_cast<std::uint16_t>(
+            stringBytes == 0 ? 0 : stringBitSize));
+        data.putBit(stringBytes == 0 ? 0 : 1);
+        data.alignToByte();
+        handles.alignToByte();
+        handleBits = static_cast<std::uint32_t>(handles.data().size() * 8u);
+
+        std::vector<std::uint8_t> bytes = data.data();
+        bytes.insert(bytes.end(), handles.data().begin(),
+                     handles.data().end());
+        return bytes;
+    };
+    const auto parse = [version](std::vector<std::uint8_t>& bytes,
+                                 std::uint32_t handleBits,
+                                 DRW_Dictionary& parsed) {
+        DRW_TextCodec decoder;
+        decoder.setVersion(version, false);
+        decoder.setCodePage("UTF-16", false);
+        dwgBuffer reader(bytes.data(), bytes.size(), &decoder);
+        return DrwObjectEncodeTestAccess::parse(parsed, version, &reader,
+                                                handleBits);
+    };
+
+    SECTION("a named key without an object") {
+        std::uint32_t handleBits = 0;
+        auto bytes = emit(/*hardOwner=*/0,
+                          {{"ACAD_PARALLEL_BACKGROUND", 0}}, handleBits);
+        DRW_Dictionary parsed;
+        REQUIRE(parse(bytes, handleBits, parsed));
+        CHECK(parsed.hasCompleteDwgEntries());
+        CHECK(parsed.handle == 0x1C4A4u);
+        CHECK(parsed.parentHandle == 0xCu);
+        CHECK(parsed.cloning == 1);
+        CHECK(parsed.hardOwner == 0);
+        CHECK(parsed.m_entries.empty());
+    }
+
+    SECTION("an empty-named erased slot beside a live entry") {
+        std::uint32_t handleBits = 0;
+        auto bytes = emit(/*hardOwner=*/1,
+                          {{"", 0}, {"FBXASSET", 0x18A}, {"", 0}},
+                          handleBits);
+        DRW_Dictionary parsed;
+        REQUIRE(parse(bytes, handleBits, parsed));
+        CHECK(parsed.hasCompleteDwgEntries());
+        CHECK(parsed.hardOwner == 1);
+        REQUIRE(parsed.m_entries.size() == 1u);
+        CHECK(parsed.m_entries[0].m_name == "FBXASSET");
+        CHECK(parsed.m_entries[0].m_handle == 0x18Au);
+        CHECK(parsed.isDwgPayloadValid(version));
+    }
+
+    SECTION("an empty name with a live item is still rejected") {
+        std::uint32_t handleBits = 0;
+        auto bytes = emit(/*hardOwner=*/1, {{"", 0x2A}}, handleBits);
+        DRW_Dictionary rejected;
+        CHECK_FALSE(parse(bytes, handleBits, rejected));
+        CHECK(rejected.m_entries.empty());
+    }
+
+    SECTION("a wide item whose low 32 bits are zero is not null") {
+        std::uint32_t handleBits = 0;
+        auto bytes = emit(/*hardOwner=*/0, {{"WIDE", 0x100000000ULL}},
+                          handleBits);
+        DRW_Dictionary rejected;
+        CHECK_FALSE(parse(bytes, handleBits, rejected));
+        CHECK(rejected.m_entries.empty());
+    }
+}
+
 TEST_CASE("DRW_Dictionary count diagnostics do not affect encoding",
           "[dwg-write][object-encode][dictionary][count-cap]") {
     DRW_Dictionary source;

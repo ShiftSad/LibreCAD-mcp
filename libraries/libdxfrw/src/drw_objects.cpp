@@ -7979,13 +7979,13 @@ bool DRW_Dictionary::parseCode(int code, const std::unique_ptr<dxfReader>& reade
     case 360: { //hard-owned entry handle
         // The hard-owner flag says how entries are owned; files mix 350 and
         // 360 regardless (ezdxf writes 350 under 280 = 1).
-        if (m_pendingEntryName.empty())
+        if (m_pendingEntryName.empty() || !reader->isValidHandleString())
             return false;
         const std::uint32_t entryHandle =
             static_cast<std::uint32_t>(reader->getHandleString());
-        if (entryHandle == 0)
-            return false;
-        m_entries.push_back({m_pendingEntryName, entryHandle});
+        // A null target names no member; drop the pair as the DWG parser does.
+        if (entryHandle != 0)
+            m_entries.push_back({m_pendingEntryName, entryHandle});
         m_pendingEntryName.clear();
         break;
     }
@@ -8138,6 +8138,15 @@ bool DRW_Dictionary::parseDwgImpl(DRW::Version version, dwgBuffer *buf,
         dwgHandle itemH;
         if (!readDwgObjectHandleWithinFrame(version, *buf, true, itemH))
             return false;
+        // AutoCAD writes pairs whose item handle is null: a named key with no
+        // object (ACAD_PARALLEL_BACKGROUND when a viewport has no background)
+        // or an empty-named slot left by an erased entry. Such a pair is
+        // consumed with the counted stream but names no member, so it is not
+        // published; every published entry keeps a name and a non-null item.
+        // A wide handle whose low 32 bits are zero is not null and stays a
+        // parse failure, as the entry model cannot represent it.
+        if (itemH.ref64 == 0)
+            continue;
         if (names[i].empty() || itemH.ref == 0)
             return false;
         entries.push_back({names[i], itemH.ref});

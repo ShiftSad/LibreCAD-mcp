@@ -6553,17 +6553,31 @@ TEST_CASE("DXF DICTIONARY rejects malformed entry pairs atomically",
     CHECK(cap.m_callCount == 0);
   }
 
-  SECTION("an empty name or null target") {
+  SECTION("an empty name") {
     DictionaryCapture emptyName;
     CHECK_FALSE(tryReadDxf(prefix + "3\n\n350\n2A\n" + suffix, emptyName,
                            "lc_dictionary_empty_entry_name.dxf"));
     CHECK(emptyName.m_callCount == 0);
+  }
 
+  SECTION("a null target names no member and is dropped") {
+    // AutoCAD writes keys such as ACAD_PARALLEL_BACKGROUND with no object;
+    // the DWG reader drops the same pair.
     DictionaryCapture nullTarget;
-    CHECK_FALSE(tryReadDxf(prefix + "3\nNULL\n350\n0\n" + suffix,
-                           nullTarget,
-                           "lc_dictionary_null_entry_target.dxf"));
-    CHECK(nullTarget.m_callCount == 0);
+    CHECK(tryReadDxf(prefix + "3\nNULL\n350\n0\n3\nKEPT\n350\n2A\n"
+                         + "3\nHARD_NULL\n360\n0\n" + suffix,
+                     nullTarget, "lc_dictionary_null_entry_target.dxf"));
+    REQUIRE(nullTarget.m_callCount == 1);
+    REQUIRE(nullTarget.m_captured.m_entries.size() == 1);
+    CHECK(nullTarget.m_captured.m_entries[0].m_name == "KEPT");
+    CHECK(nullTarget.m_captured.m_entries[0].m_handle == 0x2Au);
+
+    // A name still needs a following handle when its target is null.
+    DictionaryCapture dangling;
+    CHECK_FALSE(tryReadDxf(prefix + "3\nNULL\n350\n0\n350\n2A\n" + suffix,
+                           dangling,
+                           "lc_dictionary_null_entry_extra_handle.dxf"));
+    CHECK(dangling.m_callCount == 0);
   }
 
   SECTION("the entry reference code need not match hard-owner") {
