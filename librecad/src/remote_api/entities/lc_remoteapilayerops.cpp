@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -156,10 +155,16 @@ QJsonObject LC_RemoteApiLayerOps::create(const LC_JsonReader& body, QString& aud
     layer->setPrint(body.flag("printable", true));
     layer->setConstruction(body.flag("construction", false));
 
+    RS_Layer* previous = m_graphic->getActiveLayer();
     RS_Layer* added = layer.release();
     m_graphic->addLayer(added);
     if (makeCurrent) {
         m_graphic->activateLayer(added, true);
+    }
+    else if (previous != nullptr && m_graphic->getActiveLayer() != previous) {
+        // The layer list widget activates every layer added to the active
+        // drawing (QG_LayerWidget::layerAdded); make_current is false.
+        m_graphic->activateLayer(previous, true);
     }
     m_viewport->notifyChanged();
     audit = QStringLiteral("[MCP] created layer '%1'").arg(name);

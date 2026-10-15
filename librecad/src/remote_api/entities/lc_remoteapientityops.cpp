@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -48,9 +47,11 @@
 #include "rs_layer.h"
 #include "rs_line.h"
 #include "rs_math.h"
+#include "rs_mtext.h"
 #include "rs_polyline.h"
 #include "rs_selection.h"
 #include "rs_spline.h"
+#include "rs_text.h"
 
 namespace {
 
@@ -177,10 +178,11 @@ bool closedArea(RS_Entity* e, double& area, double& perimeter) {
         }
         case RS2::EntityEllipse: {
             const auto* ellipse = static_cast<RS_Ellipse*>(e);
-            if (ellipse->isEllipticArc()) {
+            if (!json::isFullEllipse(ellipse)) {
                 return false;
             }
-            area = std::abs(ellipse->areaLineIntegral());
+            // pi a b: a full ellipse stored with equal nonzero angles is an "arc" to LibreCAD
+            area = M_PI * ellipse->getMajorRadius() * ellipse->getMinorRadius();
             perimeter = ellipse->getLength();
             return true;
         }
@@ -189,8 +191,8 @@ bool closedArea(RS_Entity* e, double& area, double& perimeter) {
             if (!polyline->isClosed()) {
                 return false;
             }
-            area = std::abs(polyline->areaLineIntegral());
-            perimeter = polyline->getLength();
+            area = json::closedPolylineArea(polyline);
+            perimeter = json::polylineLength(polyline);
             return true;
         }
         case RS2::EntitySpline: {
@@ -215,7 +217,8 @@ bool closedArea(RS_Entity* e, double& area, double& perimeter) {
             const auto* hatch = static_cast<RS_Hatch*>(e);
             area = hatch->getTotalArea();
             perimeter = 0.0;
-            for (int i = 0; i < hatch->countLoops(); ++i) {
+            // every loop, holes included: countLoops() counts the outer loops only
+            for (int i = 0; i < hatch->countAllLoops(); ++i) {
                 const RS_EntityContainer* loop = hatch->getBoundaryContainer(i);
                 if (loop != nullptr) {
                     perimeter += piecesLength(loop);
@@ -225,6 +228,81 @@ bool closedArea(RS_Entity* e, double& area, double& perimeter) {
         }
         default:
             return false;
+    }
+}
+
+/** Whether measure kind=length applies: curves only (text, hatches, inserts and points have no length). */
+bool hasLength(const RS_Entity* e) {
+    switch (e->rtti()) {
+        case RS2::EntityLine:
+        case RS2::EntityArc:
+        case RS2::EntityCircle:
+        case RS2::EntityEllipse:
+        case RS2::EntityPolyline:
+        case RS2::EntitySpline:
+        case RS2::EntitySplinePoints:
+        case RS2::EntityParabola:
+        case RS2::EntityHyperbola:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isCurved(const RS_Entity* e) {
+    switch (e->rtti()) {
+        case RS2::EntityArc:
+        case RS2::EntityCircle:
+        case RS2::EntityEllipse:
+        case RS2::EntitySpline:
+        case RS2::EntitySplinePoints:
+        case RS2::EntityParabola:
+        case RS2::EntityHyperbola:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/**
+ * Why e cannot follow a non-uniform scale, or empty when it can. LibreCAD
+ * applies only the x factor to text heights and to the arcs of hatch loops,
+ * and turns polyline arcs into elliptic segments no bulge can describe.
+ */
+QString nonUniformScaleRefusal(RS_Entity* e) {
+    switch (e->rtti()) {
+        case RS2::EntityText:
+        case RS2::EntityMText:
+            return QStringLiteral("text cannot be scaled by different x and y factors; scale it uniformly");
+        case RS2::EntityPolyline:
+            for (const RS_Entity* segment : *static_cast<RS_Polyline*>(e)) {
+                if (segment != nullptr && isCurved(segment)) {
+                    return QStringLiteral("a polyline with arc segments cannot be scaled by different x and y factors; "
+                                          "explode it first, or scale it uniformly");
+                }
+            }
+            return {};
+        case RS2::EntityHatch: {
+            const auto* hatch = static_cast<RS_Hatch*>(e);
+            for (int i = 0; i < hatch->countAllLoops(); ++i) {
+                const RS_EntityContainer* loop = hatch->getBoundaryContainer(i);
+                if (loop == nullptr) {
+                    continue;
+                }
+                for (const RS_Entity* piece : lc::LC_ContainerTraverser{*loop, RS2::ResolveAll}.entities()) {
+                    if (piece != nullptr && isCurved(piece)) {
+                        return QStringLiteral("a hatch with curved boundary edges cannot be scaled by different x and y "
+                                              "factors; delete it and hatch the scaled boundary again");
+                    }
+                }
+            }
+            return {};
+        }
+        case RS2::EntityDimRadial:
+        case RS2::EntityDimDiametric:
+            return QStringLiteral("a radial or diametric dimension cannot be scaled by different x and y factors");
+        default:
+            return {};
     }
 }
 
@@ -599,6 +677,12 @@ QJsonObject LC_RemoteApiEntityOps::transform(const LC_JsonReader& body, QString&
         if (std::abs(spec.factor.x) < RS_TOLERANCE || std::abs(spec.factor.y) < RS_TOLERANCE) {
             json::throwBadParam(QStringLiteral("factor"), QStringLiteral("'factor' must not be zero"));
         }
+        if (spec.factor.x < 0.0 || spec.factor.y < 0.0) {
+            // a negative factor mirrors: text, dimensions and the like would read back with
+            // negative sizes; op mirror does it properly
+            json::throwBadParam(QStringLiteral("factor"),
+                                QStringLiteral("'factor' must be > 0; to flip entities use op mirror"));
+        }
     }
     else {
         const QJsonValue axis = raw.value(QStringLiteral("axis"));
@@ -627,6 +711,21 @@ QJsonObject LC_RemoteApiEntityOps::transform(const LC_JsonReader& body, QString&
     const LC_RemoteApiEntityIndex index(m_document);
     const QList<RS_Entity*> entities = index.requireAll(ids);
     refuseLocked(entities);
+
+    if (spec.op == QLatin1String("scale") && !spec.isotropic()) {
+        QJsonObject refused;
+        for (RS_Entity* e : entities) {
+            const QString why = nonUniformScaleRefusal(e);
+            if (!why.isEmpty()) {
+                refused.insert(QString::number(e->lineage()), why);
+            }
+        }
+        if (!refused.isEmpty()) {
+            throw LC_ApiError(422, QStringLiteral("invalid_entity"),
+                              QStringLiteral("some entities cannot be scaled by different x and y factors; nothing was changed"),
+                              {{QStringLiteral("errors"), refused}});
+        }
+    }
 
     // build every result before changing anything
     std::vector<std::unique_ptr<RS_Entity>> results;
@@ -808,7 +907,12 @@ QJsonObject LC_RemoteApiEntityOps::measure(const LC_JsonReader& body) const {
         QJsonObject perEntity;
         QJsonArray noLength;
         for (RS_Entity* e : entities) {
-            const double length = e->getLength();
+            if (!hasLength(e)) {
+                noLength.append(json::idValue(e));
+                continue;
+            }
+            const double length = e->rtti() == RS2::EntityPolyline ? json::polylineLength(static_cast<RS_Polyline*>(e))
+                                                                   : e->getLength();
             if (length < 0.0) {
                 noLength.append(json::idValue(e));
                 continue;
@@ -817,7 +921,9 @@ QJsonObject LC_RemoteApiEntityOps::measure(const LC_JsonReader& body) const {
             perEntity.insert(QString::number(e->lineage()), length);
         }
         if (!noLength.isEmpty()) {
-            throw LC_ApiError(400, QStringLiteral("bad_param"), QStringLiteral("some entities have no length (text, hatch, point, insert, ...)"),
+            throw LC_ApiError(400, QStringLiteral("bad_param"),
+                              QStringLiteral("some entities have no length: only lines, arcs, circles, ellipses, polylines and "
+                                             "splines have one (not text, hatches, points, inserts, dimensions, ...)"),
                               {{QStringLiteral("param"), QStringLiteral("ids")}, {QStringLiteral("ids"), noLength}});
         }
         return {{QStringLiteral("length"), total}, {QStringLiteral("per_entity"), perEntity}};

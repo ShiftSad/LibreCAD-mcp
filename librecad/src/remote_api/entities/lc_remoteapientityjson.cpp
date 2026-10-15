@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -23,6 +22,7 @@
 #include "lc_remoteapientityjson.h"
 
 #include <cmath>
+#include <utility>
 
 #include <QColor>
 #include <QRegularExpression>
@@ -186,7 +186,9 @@ QJsonArray polylineVertices(const RS_Polyline* polyline) {
     for (const RS_Entity* segment : std::as_const(segments)) {
         vertices.append(vertexValue(segment->getStartpoint(), bulgeOf(segment)));
     }
-    if (!polyline->isClosed()) {
+    // An open polyline ends at the last segment's end; so does a closed one whose
+    // closing segment LibreCAD left out (shorter than 1e-4): that vertex is real.
+    if (!polyline->isClosed() || missingClosingChord(polyline).first.valid) {
         vertices.append(vertexValue(segments.last()->getEndpoint(), 0.0));
     }
     return vertices;
@@ -202,7 +204,7 @@ int polylineVertexCount(const RS_Polyline* polyline) {
     if (segments == 0) {
         return polyline->getStartpoint().valid ? 1 : 0;
     }
-    return polyline->isClosed() ? segments : segments + 1;
+    return polyline->isClosed() && !missingClosingChord(polyline).first.valid ? segments : segments + 1;
 }
 
 QJsonArray vectorPoints(const std::vector<RS_Vector>& points) {
@@ -336,7 +338,7 @@ void addGeometry(RS_Entity* e, QJsonObject& o, const Detail detail, const bool d
             put("center", pointValue(el->getCenter()));
             put("major_axis", pointValue(el->getMajorP()));
             put("ratio", el->getRatio());
-            if (el->isEllipticArc()) {
+            if (!isFullEllipse(el)) {
                 put("start_angle_deg", degreesNormalized(el->getAngle1()));
                 put("end_angle_deg", degreesNormalized(el->getAngle2()));
             }
@@ -362,9 +364,13 @@ void addGeometry(RS_Entity* e, QJsonObject& o, const Detail detail, const bool d
             put("closed", pl->isClosed());
             if (derived) {
                 put("vertex_count", polylineVertexCount(pl));
-                put("length", pl->getLength());
+                put("length", polylineLength(pl));
                 if (pl->isClosed()) {
-                    put("area", std::abs(pl->areaLineIntegral()));
+                    put("area", closedPolylineArea(pl));
+                }
+                if (hasEllipticSegments(pl)) {
+                    // the bulges above describe circular arcs: these segments are not
+                    put("elliptic_segments", true);
                 }
             }
             break;
@@ -443,7 +449,8 @@ void addGeometry(RS_Entity* e, QJsonObject& o, const Detail detail, const bool d
             put("angle_deg", degreesNormalized(h->getAngle()));
             if (derived) {
                 put("area", h->getTotalArea());
-                put("loop_count", h->countLoops());
+                // every loop given, holes included (countLoops() counts outer loops only)
+                put("loop_count", h->countAllLoops());
             }
             break;
         }
@@ -803,6 +810,73 @@ QString dimensionTypeName(const RS2::EntityType rtti) {
         default:
             return {};
     }
+}
+
+bool isFullEllipse(const RS_Ellipse* ellipse) {
+    if (!ellipse->isEllipticArc()) {
+        return true;
+    }
+    return std::abs(std::remainder(ellipse->getAngle2() - ellipse->getAngle1(), 2.0 * M_PI)) < RS_TOLERANCE_ANGLE;
+}
+
+std::pair<RS_Vector, RS_Vector> missingClosingChord(const RS_Polyline* polyline) {
+    if (!polyline->isClosed()) {
+        return {RS_Vector(false), RS_Vector(false)};
+    }
+    const RS_Entity* first = nullptr;
+    const RS_Entity* last = nullptr;
+    for (const RS_Entity* e : *polyline) {
+        if (e != nullptr && e->isAtomic()) {
+            if (first == nullptr) {
+                first = e;
+            }
+            last = e;
+        }
+    }
+    if (first == nullptr) {
+        return {RS_Vector(false), RS_Vector(false)};
+    }
+    const RS_Vector end = last->getEndpoint();
+    const RS_Vector start = first->getStartpoint();
+    if (!end.valid || !start.valid || end.distanceTo(start) <= RS_TOLERANCE) {
+        return {RS_Vector(false), RS_Vector(false)};
+    }
+    return {end, start};
+}
+
+double closedPolylineArea(const RS_Polyline* polyline) {
+    // the line integral of x dy along the segments in their order, plus the
+    // chord LibreCAD leaves out: without it the result depends on where the
+    // polyline is (an open chain is not translation invariant)
+    double integral = 0.0;
+    for (const RS_Entity* e : *polyline) {
+        if (e != nullptr && e->isAtomic()) {
+            integral += e->areaLineIntegral();
+        }
+    }
+    const auto [from, to] = missingClosingChord(polyline);
+    if (from.valid) {
+        integral += 0.5 * (to.y - from.y) * (from.x + to.x);
+    }
+    return std::abs(integral);
+}
+
+double polylineLength(const RS_Polyline* polyline) {
+    double length = polyline->getLength();
+    const auto [from, to] = missingClosingChord(polyline);
+    if (from.valid) {
+        length += from.distanceTo(to);
+    }
+    return length;
+}
+
+bool hasEllipticSegments(const RS_Polyline* polyline) {
+    for (const RS_Entity* e : *polyline) {
+        if (e != nullptr && e->rtti() == RS2::EntityEllipse) {
+            return true;
+        }
+    }
+    return false;
 }
 
 QJsonObject entityToJson(RS_Entity* e, const Detail detail) {

@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -34,10 +33,18 @@
 #include "lc_remoteapi_entities_testsupport.h"
 #include "lc_remoteapientityjson.h"
 #include "lc_sourcefonts.h"
+#include "rs_arc.h"
 #include "rs_block.h"
+#include "rs_dimangular.h"
+#include "rs_ellipse.h"
 #include "rs_insert.h"
+#include "rs_layerlist.h"
+#include "rs_layerlistlistener.h"
 #include "rs_line.h"
 #include "rs_math.h"
+#include "rs_polyline.h"
+#include "rs_spline.h"
+#include "rs_text.h"
 
 using namespace lc::test::remoteapi;
 
@@ -733,4 +740,292 @@ TEST_CASE("Remote API: PATCH changes the geometry of every type and keeps the id
     CHECK(near(dims.at(0).toObject().value(QStringLiteral("measurement")).toDouble(), 20.0));
     // one live entity per case: every PATCH replaced its entity
     CHECK(d.liveCount() == static_cast<int>(std::size(cases)));
+}
+
+// ---------------------------------------------------------------------------
+// Review fixes: contract and geometry
+
+namespace {
+
+QJsonObject entityOf(Drawing& d, const unsigned long long id) {
+    return d.ops().get(id).value(QStringLiteral("entity")).toObject();
+}
+
+QJsonObject patchOf(Drawing& d, const unsigned long long id, const char* body) {
+    QJsonArray warnings;
+    QString audit;
+    return d.ops().update(id, LC_JsonReader(object(body)), warnings, audit).value(QStringLiteral("entity")).toObject();
+}
+
+QJsonObject measureOf(Drawing& d, const QString& body) {
+    return d.ops().measure(LC_JsonReader(object(body.toUtf8().constData())));
+}
+
+/** As QG_LayerWidget does for the active drawing: every added layer becomes current. */
+class ActivatingListener : public RS_LayerListListener {
+public:
+    explicit ActivatingListener(RS_Graphic& graphic)
+        : m_graphic(graphic) {
+    }
+    void layerAdded(RS_Layer* layer) override {
+        m_graphic.activateLayer(layer, true);
+    }
+
+private:
+    RS_Graphic& m_graphic;
+};
+
+} // namespace
+
+TEST_CASE("Remote API: creating a layer leaves the current layer alone unless make_current", "[remote-api][layers]") {
+    Drawing d;
+    ActivatingListener widget(d.graphic);
+    d.graphic.getLayerList()->addListener(&widget);
+    QString audit;
+    d.layers().create(LC_JsonReader(object(R"({"name":"dims"})")), audit);
+    CHECK(d.graphic.getActiveLayer()->getName() == QStringLiteral("0"));
+    d.layers().create(LC_JsonReader(object(R"({"name":"locked","locked":true})")), audit);
+    CHECK(d.graphic.getActiveLayer()->getName() == QStringLiteral("0"));
+    // entities without a layer still go on the current layer
+    const unsigned long long point = d.createOne(R"({"entities":[{"type":"point","position":[0,0]}]})");
+    CHECK(entityOf(d, point).value(QStringLiteral("layer")).toString() == QStringLiteral("0"));
+    const QJsonObject made = d.layers().create(LC_JsonReader(object(R"({"name":"walls","make_current":true})")), audit);
+    CHECK(made.value(QStringLiteral("layer")).toObject().value(QStringLiteral("current")).toBool());
+    CHECK(d.graphic.getActiveLayer()->getName() == QStringLiteral("walls"));
+    d.graphic.getLayerList()->removeListener(&widget);
+}
+
+TEST_CASE("Remote API: length is measured for curves only", "[remote-api][entities]") {
+    Drawing d;
+    lc::test::SourceFonts fonts;
+    const unsigned long long text = d.createOne(R"({"entities":[{"type":"text","position":[0,0],"text":"HELLO","height":10}]})");
+    const unsigned long long hatch = d.createOne(R"({"entities":[{"type":"hatch","boundary":[[[0,0],[10,0],[10,10],[0,10]]]}]})");
+    const unsigned long long point = d.createOne(R"({"entities":[{"type":"point","position":[0,0]}]})");
+    const unsigned long long line = d.createOne(R"({"entities":[{"type":"line","start":[0,0],"end":[3,4]}]})");
+    const LC_ApiError refused = errorOf([&] { measureOf(d, QStringLiteral(R"({"kind":"length","ids":[%1,%2,%3,%4]})").arg(text).arg(hatch).arg(point).arg(line)); });
+    CHECK(refused.status == 400);
+    CHECK(refused.token == QStringLiteral("bad_param"));
+    CHECK(refused.extra.value(QStringLiteral("ids")).toArray() ==
+          QJsonArray{static_cast<qint64>(text), static_cast<qint64>(hatch), static_cast<qint64>(point)});
+    CHECK(near(measureOf(d, QStringLiteral(R"({"kind":"length","ids":[%1]})").arg(line)).value(QStringLiteral("length")).toDouble(), 5.0));
+}
+
+TEST_CASE("Remote API: PATCH with a field of another type lists the accepted ones", "[remote-api][entities]") {
+    Drawing d;
+    const unsigned long long line = d.createOne(R"({"entities":[{"type":"line","start":[0,0],"end":[1,0]}]})");
+    QJsonArray warnings;
+    QString audit;
+    const LC_ApiError e = errorOf([&] { d.ops().update(line, LC_JsonReader(object(R"({"radius":1})")), warnings, audit); });
+    CHECK(e.token == QStringLiteral("unknown_field"));
+    CHECK(e.extra.value(QStringLiteral("field")).toString() == QStringLiteral("radius"));
+    const QJsonArray allowed = e.extra.value(QStringLiteral("allowed")).toArray();
+    for (const char* field : {"start", "end", "layer", "color", "linetype", "lineweight"}) {
+        CHECK(allowed.contains(QJsonValue(QLatin1String(field))));
+    }
+    CHECK(e.detail.contains(QStringLiteral("layer")));
+}
+
+TEST_CASE("Remote API: transforms refuse what entities cannot follow", "[remote-api][entities]") {
+    Drawing d;
+    lc::test::SourceFonts fonts;
+    const unsigned long long text = d.createOne(R"({"entities":[{"type":"text","position":[10,10],"text":"A","height":2}]})");
+    const unsigned long long bulged = d.createOne(R"({"entities":[{"type":"polyline","vertices":[[0,0,1],[10,0],[10,10]]}]})");
+    const unsigned long long curvedHatch = d.createOne(R"({"entities":[{"type":"hatch","boundary":[[[0,0,1],[10,0,1]]]}]})");
+    const unsigned long long line = d.createOne(R"({"entities":[{"type":"line","start":[0,0],"end":[10,0]}]})");
+    QString audit;
+    const auto transform = [&](const QString& body) {
+        return d.ops().transform(LC_JsonReader(object(body.toUtf8().constData())), audit);
+    };
+    const LC_ApiError negative = errorOf([&] { transform(QStringLiteral(R"({"ids":[%1],"op":"scale","base":[0,0],"factor":-1})").arg(text)); });
+    CHECK(negative.status == 400);
+    CHECK(negative.extra.value(QStringLiteral("param")).toString() == QStringLiteral("factor"));
+    CHECK(errorOf([&] { transform(QStringLiteral(R"({"ids":[%1],"op":"scale","base":[0,0],"factor":[-1,1]})").arg(line)); }).token ==
+          QStringLiteral("bad_param"));
+
+    const LC_ApiError uneven = errorOf([&] {
+        transform(QStringLiteral(R"({"ids":[%1,%2,%3,%4],"op":"scale","base":[0,0],"factor":[1,3]})").arg(text).arg(bulged).arg(curvedHatch).arg(line));
+    });
+    CHECK(uneven.status == 422);
+    CHECK(uneven.token == QStringLiteral("invalid_entity"));
+    const QJsonObject errors = uneven.extra.value(QStringLiteral("errors")).toObject();
+    CHECK(errors.contains(QString::number(text)));
+    CHECK(errors.contains(QString::number(bulged)));
+    CHECK(errors.contains(QString::number(curvedHatch)));
+    CHECK_FALSE(errors.contains(QString::number(line)));
+    // nothing changed
+    CHECK(nearPoint(entityOf(d, text).value(QStringLiteral("position")), 10.0, 10.0));
+    CHECK(nearPoint(entityOf(d, line).value(QStringLiteral("end")), 10.0, 0.0));
+    // what can follow does
+    transform(QStringLiteral(R"({"ids":[%1],"op":"scale","base":[0,0],"factor":[1,3]})").arg(line));
+    CHECK(nearPoint(entityOf(d, line).value(QStringLiteral("end")), 10.0, 0.0));
+    transform(QStringLiteral(R"({"ids":[%1],"op":"scale","base":[0,0],"factor":2})").arg(text));
+    CHECK(near(entityOf(d, text).value(QStringLiteral("height")).toDouble(), 4.0));
+}
+
+TEST_CASE("Remote API: PATCH to an aligned or fit text keeps its second point", "[remote-api][entities]") {
+    Drawing d;
+    lc::test::SourceFonts fonts;
+    const unsigned long long id = d.createOne(R"({"entities":[{"type":"text","position":[5,5],"text":"AB","height":2}]})");
+    QJsonObject text = patchOf(d, id, R"({"halign":"aligned","second_point":[25,5]})");
+    CHECK(text.value(QStringLiteral("halign")).toString() == QStringLiteral("aligned"));
+    CHECK(nearPoint(text.value(QStringLiteral("second_point")), 25.0, 5.0));
+    CHECK(text.value(QStringLiteral("height")).toDouble() > 0.0);
+    CHECK(near(text.value(QStringLiteral("bbox")).toObject().value(QStringLiteral("max")).toArray().at(0).toDouble(), 25.0, 0.5));
+    // and back: the merged height is still a usable one
+    text = patchOf(d, id, R"({"halign":"left"})");
+    CHECK(text.value(QStringLiteral("halign")).toString() == QStringLiteral("left"));
+    CHECK(text.value(QStringLiteral("height")).toDouble() > 0.0);
+
+    const unsigned long long fit = d.createOne(R"({"entities":[{"type":"text","position":[0,0],"text":"AB","height":2}]})");
+    text = patchOf(d, fit, R"({"halign":"fit","second_point":[20,0]})");
+    CHECK(nearPoint(text.value(QStringLiteral("second_point")), 20.0, 0.0));
+    CHECK(near(text.value(QStringLiteral("height")).toDouble(), 2.0));
+    CHECK(near(text.value(QStringLiteral("bbox")).toObject().value(QStringLiteral("max")).toArray().at(0).toDouble(), 20.0, 0.5));
+}
+
+TEST_CASE("Remote API: PATCH keeps the angle an imported angular dimension shows", "[remote-api][entities]") {
+    Drawing d;
+    // as read from a file: P2-P1 and P-P3 with arc_point outside the sector they span
+    RS_DimensionData data(RS_Vector(100.7299, 79.7716), RS_Vector(false), RS_MTextData::VAMiddle, RS_MTextData::HACenter,
+                          RS_MTextData::Exact, 1.0, QString(), d.graphic.getDefaultDimStyleName(), 0.0, 0.0, true, nullptr, false, false);
+    auto* dim = new RS_DimAngular(&d.graphic, data,
+                                  RS_DimAngularData(RS_Vector(100.7299, 79.7716), RS_Vector(100.7299, 75.2296),
+                                                    RS_Vector(106.7359, 78.7557), RS_Vector(100.8817, 79.4710)));
+    dim->update();
+    d.graphic.addEntity(dim);
+    const unsigned long long id = dim->lineage();
+    const double shown = entityOf(d, id).value(QStringLiteral("measurement")).toDouble();
+    CHECK(near(patchOf(d, id, R"({"text":""})").value(QStringLiteral("measurement")).toDouble(), shown));
+    CHECK(near(patchOf(d, id, R"({"text":"<> deg"})").value(QStringLiteral("measurement")).toDouble(), shown));
+    // a geometry PATCH that repeats a point keeps it too
+    CHECK(near(patchOf(d, id, R"({"arc_point":[100.8817,79.4710]})").value(QStringLiteral("measurement")).toDouble(), shown));
+}
+
+TEST_CASE("Remote API: PATCH keeps the knots and weights of a spline", "[remote-api][entities]") {
+    Drawing d;
+    auto* spline = new RS_Spline(&d.graphic, RS_SplineData(3, false));
+    spline->addControlPoint(RS_Vector(0.0, 0.0));
+    spline->addControlPoint(RS_Vector(5.0, 10.0), 2.0); // rational, as files often are
+    spline->addControlPoint(RS_Vector(10.0, -10.0));
+    spline->addControlPoint(RS_Vector(15.0, 0.0));
+    spline->update();
+    d.graphic.addEntity(spline);
+    const unsigned long long id = spline->lineage();
+
+    patchOf(d, id, R"({"control_points":[[0,0],[5,12],[10,-10],[15,0]]})");
+    const auto* after = static_cast<RS_Spline*>(d.entity(id));
+    REQUIRE(after != nullptr);
+    REQUIRE(after->getWeights().size() == 4);
+    CHECK(after->getWeights().at(1) == 2.0);
+    CHECK(after->getControlPoints().at(1).y == 12.0);
+    // a new degree would lose them: refused
+    QJsonArray warnings;
+    QString audit;
+    const LC_ApiError e = errorOf([&] { d.ops().update(id, LC_JsonReader(object(R"({"degree":2})")), warnings, audit); });
+    CHECK(e.status == 422);
+    CHECK(e.token == QStringLiteral("invalid_entity"));
+    // a spline the API made has nothing to lose
+    const unsigned long long plain = d.createOne(R"({"entities":[{"type":"spline","control_points":[[0,0],[1,1],[2,0],[3,1]],"degree":3}]})");
+    CHECK(patchOf(d, plain, R"({"degree":2})").value(QStringLiteral("degree")).toInt() == 2);
+}
+
+TEST_CASE("Remote API: a closing segment LibreCAD leaves out keeps its vertex and its area", "[remote-api][entities]") {
+    Drawing d;
+    const unsigned long long near0 = d.createOne(R"({"entities":[{"type":"polyline","vertices":[[0,0],[1,0],[1,1],[0,1],[0,0.00005]],"closed":true}]})");
+    const unsigned long long far0 = d.createOne(R"({"entities":[{"type":"polyline","vertices":[[10000,0],[10001,0],[10001,1],[10000,1],[10000,0.00005]],"closed":true}]})");
+    const QJsonObject a = entityOf(d, near0);
+    const QJsonObject b = entityOf(d, far0);
+    CHECK(a.value(QStringLiteral("vertex_count")).toInt() == 5);
+    CHECK(a.value(QStringLiteral("vertices")).toArray().size() == 5);
+    CHECK(near(a.value(QStringLiteral("area")).toDouble(), 1.0, 1e-4));
+    // the same shape elsewhere has the same area (the open chain alone would not)
+    CHECK(near(b.value(QStringLiteral("area")).toDouble(), a.value(QStringLiteral("area")).toDouble(), 1e-6));
+    const QJsonObject m = measureOf(d, QStringLiteral(R"({"kind":"area","ids":[%1]})").arg(far0));
+    CHECK(near(m.value(QStringLiteral("area")).toDouble(), 1.0, 1e-4));
+    CHECK(near(m.value(QStringLiteral("perimeter")).toDouble(), 4.0, 1e-6));
+    // re-creating it from what GET reports gives the same polyline
+    const QString again = QStringLiteral(R"({"entities":[{"type":"polyline","vertices":%1,"closed":true}]})")
+                              .arg(QString::fromUtf8(QJsonDocument(a.value(QStringLiteral("vertices")).toArray()).toJson(QJsonDocument::Compact)));
+    CHECK(entityOf(d, d.createOne(again.toUtf8().constData())).value(QStringLiteral("vertex_count")).toInt() == 5);
+}
+
+TEST_CASE("Remote API: a bulge too small to be an arc is a straight segment", "[remote-api][entities]") {
+    Drawing d;
+    for (const char* bulge : {"2e-10", "1e-9", "-5e-9"}) {
+        CAPTURE(bulge);
+        const QString body = QStringLiteral(R"({"entities":[{"type":"polyline","vertices":[[0,0,%1],[1,0]]}]})").arg(QLatin1String(bulge));
+        const QJsonObject e = entityOf(d, d.createOne(body.toUtf8().constData()));
+        CHECK(near(e.value(QStringLiteral("length")).toDouble(), 1.0));
+        CHECK(e.value(QStringLiteral("bbox")).toObject().value(QStringLiteral("max")).toArray().at(0).toDouble() < 1.5);
+    }
+    const QJsonObject square = entityOf(d, d.createOne(R"({"entities":[{"type":"polyline","vertices":[[0,0,1e-9],[1,0],[1,1],[0,1]],"closed":true}]})"));
+    CHECK(near(square.value(QStringLiteral("area")).toDouble(), 1.0));
+    // a real (small) arc still is one
+    const QJsonObject arc = entityOf(d, d.createOne(R"({"entities":[{"type":"polyline","vertices":[[0,0,0.01],[1,0]]}]})"));
+    CHECK(arc.value(QStringLiteral("length")).toDouble() > 1.0);
+}
+
+TEST_CASE("Remote API: hatch holes count in loop_count and the perimeter", "[remote-api][entities]") {
+    Drawing d;
+    const unsigned long long id =
+        d.createOne(R"({"entities":[{"type":"hatch","boundary":[[[0,0],[10,0],[10,10],[0,10]],[[3,3],[7,3],[7,7],[3,7]]]}]})");
+    const QJsonObject hatch = entityOf(d, id);
+    CHECK(hatch.value(QStringLiteral("loop_count")).toInt() == 2);
+    CHECK(near(hatch.value(QStringLiteral("area")).toDouble(), 84.0, 1e-6));
+    const QJsonObject m = measureOf(d, QStringLiteral(R"({"kind":"area","ids":[%1]})").arg(id));
+    CHECK(near(m.value(QStringLiteral("area")).toDouble(), 84.0, 1e-6));
+    CHECK(near(m.value(QStringLiteral("perimeter")).toDouble(), 56.0, 1e-6));
+}
+
+TEST_CASE("Remote API: a full ellipse stored with equal start and end angles", "[remote-api][entities]") {
+    Drawing d;
+    auto* ellipse = new RS_Ellipse(&d.graphic, RS_EllipseData{RS_Vector(0.0, 0.0), RS_Vector(4.0, 0.0), 0.5, M_PI, M_PI, false});
+    d.graphic.addEntity(ellipse);
+    const unsigned long long id = ellipse->lineage();
+    const QJsonObject e = entityOf(d, id);
+    CHECK(e.value(QStringLiteral("start_angle_deg")).toDouble() == 0.0);
+    CHECK(e.value(QStringLiteral("end_angle_deg")).toDouble() == 360.0);
+    const QJsonObject m = measureOf(d, QStringLiteral(R"({"kind":"area","ids":[%1]})").arg(id));
+    CHECK(near(m.value(QStringLiteral("area")).toDouble(), M_PI * 4.0 * 2.0, 1e-9));
+}
+
+TEST_CASE("Remote API: angles a PATCH does not name keep their exact value", "[remote-api][entities]") {
+    Drawing d;
+    lc::test::SourceFonts fonts;
+    const unsigned long long arc = d.createOne(R"({"entities":[{"type":"arc","center":[0,0],"radius":1,"start_angle_deg":30,"end_angle_deg":120}]})");
+    const double angle1 = static_cast<RS_Arc*>(d.entity(arc))->getAngle1();
+    const double read1 = entityOf(d, arc).value(QStringLiteral("start_angle_deg")).toDouble();
+    const QJsonObject patched = patchOf(d, arc, R"({"radius":5})");
+    CHECK(patched.value(QStringLiteral("start_angle_deg")).toDouble() == read1);
+    CHECK(static_cast<RS_Arc*>(d.entity(arc))->getAngle1() == angle1);
+
+    const unsigned long long ellipse =
+        d.createOne(R"({"entities":[{"type":"ellipse","center":[0,0],"major_axis":[4,0],"ratio":0.5,"start_angle_deg":10,"end_angle_deg":100}]})");
+    const double eAngle1 = static_cast<RS_Ellipse*>(d.entity(ellipse))->getAngle1();
+    patchOf(d, ellipse, R"({"ratio":0.25})");
+    CHECK(static_cast<RS_Ellipse*>(d.entity(ellipse))->getAngle1() == eAngle1);
+
+    const unsigned long long text = d.createOne(R"({"entities":[{"type":"text","position":[0,0],"text":"a","height":1,"angle_deg":10}]})");
+    const double tAngle = static_cast<RS_Text*>(d.entity(text))->getAngle();
+    patchOf(d, text, R"({"text":"b"})");
+    CHECK(static_cast<RS_Text*>(d.entity(text))->getAngle() == tAngle);
+}
+
+TEST_CASE("Remote API: a polyline with elliptic segments is flagged and not rebuilt", "[remote-api][entities]") {
+    Drawing d;
+    auto* polyline = new RS_Polyline(&d.graphic);
+    polyline->addVertex(RS_Vector(0.0, 0.0), 1.0);
+    polyline->addVertex(RS_Vector(10.0, 0.0));
+    polyline->addVertex(RS_Vector(10.0, 10.0));
+    polyline->scale(RS_Vector(0.0, 0.0), RS_Vector(2.0, 1.0)); // its arc becomes an elliptic segment
+    d.graphic.addEntity(polyline);
+    const unsigned long long id = polyline->lineage();
+    CHECK(entityOf(d, id).value(QStringLiteral("elliptic_segments")).toBool());
+    QJsonArray warnings;
+    QString audit;
+    const LC_ApiError e = errorOf([&] { d.ops().update(id, LC_JsonReader(object(R"({"closed":true})")), warnings, audit); });
+    CHECK(e.status == 422);
+    CHECK(e.token == QStringLiteral("invalid_entity"));
+    // attributes still change
+    CHECK(patchOf(d, id, R"({"color":"#00ff00"})").value(QStringLiteral("color")).toString() == QStringLiteral("#00ff00"));
 }

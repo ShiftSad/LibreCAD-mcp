@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -149,6 +148,72 @@ void checkFields(const QJsonObject& object, const QString& path, const QStringLi
     }
 }
 
+/** 400 unknown_field of a PATCH body, with every field the entity accepts in "allowed". */
+[[noreturn]] void throwPatchUnknownField(const QString& field, const QString& detail, const QStringList& geometry) {
+    QStringList accepted = geometry;
+    for (const QString& attribute : attributeFields()) {
+        if (!accepted.contains(attribute)) {
+            accepted << attribute;
+        }
+    }
+    accepted.sort();
+    throw LC_ApiError(400, QStringLiteral("unknown_field"), detail,
+                      {{QStringLiteral("field"), field}, {QStringLiteral("allowed"), QJsonArray::fromStringList(accepted)}});
+}
+
+void checkPatchFields(const QJsonObject& fields, const QStringList& geometry, const QString& type) {
+    for (auto it = fields.constBegin(); it != fields.constEnd(); ++it) {
+        if (!geometry.contains(it.key())) {
+            throwPatchUnknownField(it.key(),
+                                   QStringLiteral("'%1' is not a field of a %2 (fields: %3; and layer, color, linetype, lineweight)")
+                                       .arg(it.key(), type, geometry.join(QStringLiteral(", "))),
+                                   geometry);
+        }
+    }
+}
+
+/** Knot vector scaled to [0, 1]: a reparameterization that leaves the curve as it is. */
+std::vector<double> normalizedKnots(std::vector<double> knots) {
+    if (knots.size() < 2) {
+        return knots;
+    }
+    const double first = knots.front();
+    const double span = knots.back() - first;
+    for (double& knot : knots) {
+        knot = span > 0.0 ? (knot - first) / span : 0.0;
+    }
+    return knots;
+}
+
+/**
+ * Whether LibreCAD makes the same curve from the spline's control points,
+ * degree and closed flag alone: no knot vector or weights of its own (imported
+ * splines often have both), so rebuilding it loses nothing.
+ */
+bool rebuildable(const RS_Spline* spline) {
+    for (const double weight : spline->getWeights()) {
+        if (std::abs(weight - 1.0) > 1e-12) {
+            return false;
+        }
+    }
+    RS_Spline probe(nullptr, RS_SplineData(spline->getDegree(), spline->isClosed()));
+    for (const RS_Vector& p : spline->getControlPoints()) {
+        probe.addControlPoint(p);
+    }
+    probe.update();
+    const std::vector<double> mine = normalizedKnots(spline->getKnotVector());
+    const std::vector<double> standard = normalizedKnots(probe.getKnotVector());
+    if (mine.size() != standard.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < mine.size(); ++i) {
+        if (std::abs(mine[i] - standard[i]) > 1e-9) {
+            return false;
+        }
+    }
+    return true;
+}
+
 double radians(const double degrees) {
     return RS_Math::correctAngle(RS_Math::deg2rad(degrees));
 }
@@ -202,6 +267,9 @@ QString checkFont(const QString& style, const QString& param, QStringList& warni
     return style;
 }
 
+// Bulges below this are straight segments (see readVertices).
+constexpr double MinBulge = 1e-8;
+
 /** [x, y] or [x, y, bulge] vertices. */
 void readVertices(const QJsonValue& value, const QString& path, const int minCount, QList<RS_Vector>& points, QList<double>& bulges) {
     if (!value.isArray()) {
@@ -220,7 +288,14 @@ void readVertices(const QJsonValue& value, const QString& path, const int minCou
             }
         }
         points.append(RS_Vector(v.at(0).toDouble(), v.at(1).toDouble()));
-        bulges.append(v.size() == 3 ? v.at(2).toDouble() : 0.0);
+        double bulge = v.size() == 3 ? v.at(2).toDouble() : 0.0;
+        // An arc this flat (sweep 4*atan(bulge) under 4e-8 rad) is a straight
+        // segment within any tolerance; RS_Arc would take a sweep below its angle
+        // tolerance for a FULL circle of radius chord/(4*bulge), which is huge.
+        if (std::abs(bulge) < MinBulge) {
+            bulge = 0.0;
+        }
+        bulges.append(bulge);
     }
     if (points.size() < minCount) {
         json::throwInvalidEntity(path, QStringLiteral("needs at least %1 vertices").arg(minCount));
@@ -423,6 +498,11 @@ QStringList LC_RemoteApiEntityFactory::specFields(const QString& typeName, const
 }
 
 std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::create(const QJsonObject& spec, const QString& path, QStringList& warnings) const {
+    return createEntity(spec, path, warnings, false);
+}
+
+std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::createEntity(const QJsonObject& spec, const QString& path, QStringList& warnings,
+                                                                   const bool keepAngularOrder) const {
     const QString typePath = json::joinPath(path, QStringLiteral("type"));
     const QJsonValue typeValue = spec.value(QStringLiteral("type"));
     const QStringList creatable = json::creatableTypeNames();
@@ -613,6 +693,14 @@ std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::create(const QJsonObject& 
             const double t = RS_Vector::crossP(line2.at(0) - line1.at(0), d2).z / cross;
             const RS_Vector center = line1.at(0) + d1 * t;
             distinct(arcPoint, center, field("arc_point"), QStringLiteral("the vertex of the angle"));
+            if (keepAngularOrder) {
+                // the points as GET reports them: line1 = [P2, P1], line2 = [P, P3]
+                data.definitionPoint = line2.at(0);
+                dim = std::make_unique<RS_DimAngular>(m_document, data,
+                                                      RS_DimAngularData(line1.at(1), line1.at(0), line2.at(1), arcPoint));
+                dim->update();
+                return dim;
+            }
             // The four rays from the vertex alternate between the lines; the angle
             // measured is the sector holding arc_point, counterclockwise from the
             // ray before it to the ray after it.
@@ -753,9 +841,10 @@ std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::patch(RS_Entity* original,
     const bool readOnly = !json::creatableTypeNames().contains(type) ||
                           (type == QLatin1String("dimension") && !dimensionTypes().contains(dimType));
     if (readOnly) {
-        json::throwUnknownField(fields.constBegin().key(),
-                                QStringLiteral("this %1 is read-only: only layer, color, linetype and lineweight can change")
-                                    .arg(dimType.isEmpty() ? type : dimType + QStringLiteral(" dimension")));
+        throwPatchUnknownField(fields.constBegin().key(),
+                               QStringLiteral("this %1 is read-only: only layer, color, linetype and lineweight can change")
+                                   .arg(dimType.isEmpty() ? type : dimType + QStringLiteral(" dimension")),
+                               {});
     }
     if (type == QLatin1String("dimension")) {
         const QJsonValue requested = fields.value(QStringLiteral("dim_type"));
@@ -764,7 +853,13 @@ std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::patch(RS_Entity* original,
                                 QStringLiteral("the dim_type of a dimension cannot change (it is %1); delete it and create a new one").arg(dimType));
         }
     }
-    checkFields(fields, QString(), geometryFieldsOf(type, dimType), dimType.isEmpty() ? type : dimType + QStringLiteral(" dimension"));
+    checkPatchFields(fields, geometryFieldsOf(type, dimType), dimType.isEmpty() ? type : dimType + QStringLiteral(" dimension"));
+    if (original->rtti() == RS2::EntityPolyline && json::hasEllipticSegments(static_cast<RS_Polyline*>(original))) {
+        // bulges describe circular arcs: a rebuild would turn the elliptic segments into them
+        json::throwInvalidEntity(QStringLiteral("vertices"),
+                                 QStringLiteral("this polyline has elliptic segments (it was scaled by different x and y "
+                                                "factors), which vertices with bulges cannot describe; delete it and draw it again"));
+    }
     if (type == QLatin1String("hatch")) {
         for (const char* key : {"boundary", "boundary_ids"}) {
             if (fields.contains(QLatin1String(key))) {
@@ -790,19 +885,28 @@ std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::patch(RS_Entity* original,
     merged.insert(QStringLiteral("type"), type);
     const LC_JsonReader r(merged, QString());
 
+    const auto given = [&fields](const char* key) {
+        return fields.contains(QLatin1String(key));
+    };
     if (type == QLatin1String("text")) {
         const TextParams p = readText(r, QString(), warnings);
         std::unique_ptr<RS_Entity> clone(original->clone());
         auto* text = static_cast<RS_Text*>(clone.get());
-        text->setInsertionPoint(p.position);
-        text->setSecondPoint(p.secondPoint);
-        text->setText(p.text);
-        text->setHeight(p.height);
-        text->setAngle(p.angle);
-        text->setWidthRel(p.widthFactor);
+        // Alignment first: setText() lays the text out with the alignment it
+        // finds, and a layout with a non-aligned halign overwrites the second
+        // point. The second point is set again right before the final layout.
         text->setHAlign(p.halign);
         text->setVAlign(p.valign);
+        text->setInsertionPoint(p.position);
+        text->setHeight(p.height);
+        if (given("angle_deg")) {
+            text->setAngle(p.angle);
+        }
+        text->setWidthRel(p.widthFactor);
         text->setStyle(p.style);
+        text->setSecondPoint(p.secondPoint);
+        text->setText(p.text);
+        text->setSecondPoint(p.secondPoint);
         text->update();
         return clone;
     }
@@ -814,7 +918,9 @@ std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::patch(RS_Entity* original,
         text->setText(p.text);
         text->setHeight(p.height);
         text->setWidth(p.width);
-        text->setAngle(p.angle);
+        if (given("angle_deg")) {
+            text->setAngle(p.angle);
+        }
         text->setLineSpacingFactor(p.lineSpacing);
         text->setHAlign(p.halign);
         text->setVAlign(p.valign);
@@ -829,7 +935,9 @@ std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::patch(RS_Entity* original,
         insert->setName(p.block);
         insert->setInsertionPoint(p.position);
         insert->setScale(p.scale);
-        insert->setAngle(p.angle);
+        if (given("angle_deg")) {
+            insert->setAngle(p.angle);
+        }
         insert->setCols(p.columns);
         insert->setRows(p.rows);
         insert->setSpacing(p.spacing);
@@ -843,13 +951,97 @@ std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::patch(RS_Entity* original,
         hatch->setSolid(p.solid);
         hatch->setPattern(p.pattern);
         hatch->setScale(p.scale);
-        hatch->setAngle(p.angle);
+        if (given("angle_deg")) {
+            hatch->setAngle(p.angle);
+        }
         finishHatch(hatch, QString());
         return clone;
     }
+    if (type == QLatin1String("dimension")) {
+        bool textOnly = true;
+        for (auto it = fields.constBegin(); it != fields.constEnd(); ++it) {
+            textOnly = textOnly && (it.key() == QLatin1String("text") || it.key() == QLatin1String("style") ||
+                                    it.key() == QLatin1String("dim_type"));
+        }
+        if (textOnly) {
+            // the geometry stays exactly as it is (an imported angular dimension
+            // keeps the angle it shows): only the text and the style change
+            std::unique_ptr<RS_Entity> clone(original->clone());
+            auto* dim = static_cast<RS_Dimension*>(clone.get());
+            if (given("text")) {
+                dim->setLabel(r.str("text", QString()));
+            }
+            if (given("style")) {
+                const QString style = r.str("style");
+                if (m_graphic != nullptr && style != m_graphic->getDefaultDimStyleName() &&
+                    m_graphic->getDimStyleByName(style) == nullptr) {
+                    warnings << QStringLiteral("style: no dimension style '%1'; LibreCAD uses the drawing's default").arg(style);
+                }
+                dim->setStyle(style);
+            }
+            dim->update();
+            return clone;
+        }
+    }
+    if (original->rtti() == RS2::EntitySpline && !given("fit_points")) {
+        const auto* before = static_cast<const RS_Spline*>(original);
+        const QList<RS_Vector> points = json::parsePoints(merged.value(QStringLiteral("control_points")),
+                                                          QStringLiteral("control_points"), 2);
+        const int degree = r.integer("degree", 3, 1, 3);
+        const bool closed = r.flag("closed", false);
+        const bool sameShape = static_cast<size_t>(points.size()) == before->getControlPoints().size() &&
+                               degree == before->getDegree() && closed == before->isClosed();
+        if (sameShape) {
+            // new control points on the same structure: the knots and weights stay
+            std::unique_ptr<RS_Entity> clone(original->clone());
+            auto* spline = static_cast<RS_Spline*>(clone.get());
+            for (qsizetype i = 0; i < points.size(); ++i) {
+                spline->setControlPoint(static_cast<size_t>(i), points.at(i));
+            }
+            spline->update();
+            spline->calculateBorders();
+            return clone;
+        }
+        if (!rebuildable(before)) {
+            json::throwInvalidEntity(given("degree") ? QStringLiteral("degree")
+                                     : given("closed") ? QStringLiteral("closed")
+                                                       : QStringLiteral("control_points"),
+                                     QStringLiteral("this spline has its own knot vector or weights (it was read from a file), "
+                                                    "which a new degree, closed flag or number of control points would lose; "
+                                                    "move its control points only, or delete it and create a new spline"));
+        }
+    }
 
-    std::unique_ptr<RS_Entity> fresh = create(merged, QString(), warnings);
+    const bool angular = original->rtti() == RS2::EntityDimAngular;
+    std::unique_ptr<RS_Entity> fresh = createEntity(merged, QString(), warnings, angular);
     transplantIdentity(original, fresh.get());
+    // Angles the body does not name keep their exact value: the merged degrees
+    // went through a conversion and back.
+    if (original->rtti() == RS2::EntityArc && fresh->rtti() == RS2::EntityArc) {
+        const auto* before = static_cast<const RS_Arc*>(original);
+        auto* after = static_cast<RS_Arc*>(fresh.get());
+        if (!given("start_angle_deg")) {
+            after->setAngle1(before->getAngle1());
+        }
+        if (!given("end_angle_deg")) {
+            after->setAngle2(before->getAngle2());
+        }
+    }
+    else if (original->rtti() == RS2::EntityEllipse && fresh->rtti() == RS2::EntityEllipse) {
+        const auto* before = static_cast<const RS_Ellipse*>(original);
+        auto* after = static_cast<RS_Ellipse*>(fresh.get());
+        if (!json::isFullEllipse(before) && !json::isFullEllipse(after)) {
+            if (!given("start_angle_deg")) {
+                after->setAngle1(before->getAngle1());
+            }
+            if (!given("end_angle_deg")) {
+                after->setAngle2(before->getAngle2());
+            }
+        }
+    }
+    else if (original->rtti() == RS2::EntityDimLinear && fresh->rtti() == RS2::EntityDimLinear && !given("angle_deg")) {
+        static_cast<RS_DimLinear*>(fresh.get())->setAngle(static_cast<const RS_DimLinear*>(original)->getAngle());
+    }
     if (RS2::isDimensionalEntity(original->rtti())) {
         const auto* before = static_cast<const RS_Dimension*>(original);
         auto* after = static_cast<RS_Dimension*>(fresh.get());

@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -42,8 +41,10 @@
 #include "rs_pen.h"
 #include "rs_vector.h"
 
+class RS_Ellipse;
 class RS_Entity;
 class RS_Layer;
+class RS_Polyline;
 
 namespace LC_RemoteApiEntityJson {
 
@@ -118,6 +119,29 @@ QStringList allTypeNames();
 QStringList creatableTypeNames();
 /** The dim_type of a dimension entity ("linear", "aligned", "radial", "diametric", "angular", "arc", "ordinate"). */
 QString dimensionTypeName(RS2::EntityType rtti);
+
+/**
+ * Whether an ellipse is a full one: not an arc, or an arc whose start and end
+ * are the same angle (files store full ellipses that way too; LibreCAD draws
+ * them full).
+ */
+bool isFullEllipse(const RS_Ellipse* ellipse);
+
+/**
+ * The closing chord of a closed polyline that LibreCAD leaves out (RS_Polyline
+ * skips a closing segment shorter than 1e-4): from the end of the last segment
+ * to the start. Invalid vectors when there is none.
+ */
+std::pair<RS_Vector, RS_Vector> missingClosingChord(const RS_Polyline* polyline);
+/** Area enclosed by a closed polyline, the missing closing chord included. */
+double closedPolylineArea(const RS_Polyline* polyline);
+/** Length of a polyline; for a closed one, the missing closing chord included. */
+double polylineLength(const RS_Polyline* polyline);
+/**
+ * Whether a polyline has elliptic segments (LibreCAD turns its arcs into them
+ * when it scales it non-uniformly): bulges describe circular arcs only.
+ */
+bool hasEllipticSegments(const RS_Polyline* polyline);
 
 /** The entity as the API shows it: attributes, geometry and derived fields. */
 QJsonObject entityToJson(RS_Entity* e, Detail detail);

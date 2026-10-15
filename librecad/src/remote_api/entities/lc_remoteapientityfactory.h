@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -63,9 +62,12 @@ public:
      * extended data); the caller applies the attributes. With no geometry field
      * it is a plain clone.
      *
-     * Throws 400 unknown_field for a field of another type, 400 bad_param for a
-     * change of type or a geometry change of a read-only type, and the errors
-     * of create() for the merged values.
+     * Throws 400 unknown_field (+allowed) for a field of another type, 400
+     * bad_param for a change of type or a geometry change of a read-only type,
+     * 422 invalid_entity for a geometry change LibreCAD cannot make without
+     * losing data (a spline with its own knots or weights, a polyline with
+     * elliptic segments), and the errors of create() for the merged values.
+     * Angles the body does not name keep their exact value.
      */
     std::unique_ptr<RS_Entity> patch(RS_Entity* original, const QJsonObject& body, QStringList& warnings) const;
 
@@ -79,6 +81,15 @@ public:
     static QStringList specFields(const QString& typeName, const QString& dimType = {});
 
 private:
+    /**
+     * create(); with keepAngularOrder an angular dimension takes its points in
+     * the order GET reports them (line1 = [P2, P1], line2 = [P, P3]) and LibreCAD
+     * measures it as it measures one read from a file, instead of the sector
+     * that holds arc_point: PATCH keeps the angle an imported dimension shows.
+     */
+    std::unique_ptr<RS_Entity> createEntity(const QJsonObject& spec, const QString& path, QStringList& warnings,
+                                            bool keepAngularOrder) const;
+
     RS_Document* m_document = nullptr;
     RS_Graphic* m_graphic = nullptr;
     const LC_RemoteApiEntityIndex* m_index = nullptr;
