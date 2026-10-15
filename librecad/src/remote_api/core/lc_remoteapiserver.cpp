@@ -373,6 +373,39 @@ LC_ApiResponse evicted() {
         .toResponse();
 }
 
+// RFC 9110 10.1.1: the members of an Expect header other than 100-continue
+// (compared case-insensitively), which the server cannot meet.
+QByteArray unmetExpectation(const LC_ApiRequest& request) {
+    const auto header = request.headers.constFind(QByteArrayLiteral("expect"));
+    if (header == request.headers.cend()) {
+        return {};
+    }
+    for (const QByteArray& member : header.value().split(',')) { // a repeated header arrives joined
+        const QByteArray expectation = member.trimmed();
+        if (!expectation.isEmpty() && expectation.toLower() != "100-continue") {
+            return expectation;
+        }
+    }
+    return {};
+}
+
+bool expectsContinue(const LC_ApiRequest& request) {
+    const auto header = request.headers.constFind(QByteArrayLiteral("expect"));
+    return header != request.headers.cend() && header.value().toLower().contains("100-continue");
+}
+
+LC_ApiResponse expectationFailed(const QByteArray& expectation) {
+    QByteArray shown = expectation;
+    if (shown.size() > 40) {
+        shown = shown.left(40) + "...";
+    }
+    return LC_ApiError(417, QStringLiteral("expectation_failed"),
+                       QStringLiteral("the Remote API meets only the expectation 100-continue, not '%1'")
+                           .arg(QString::fromLatin1(shown)),
+                       {{QStringLiteral("header"), QStringLiteral("Expect")}})
+        .toResponse();
+}
+
 LC_ApiResponse waitedPastDeadline() {
     return LC_ApiError(504, QStringLiteral("ui_timeout"), QStringLiteral("the request waited past the client's deadline"),
                        {{QStringLiteral("started"), false},
@@ -804,6 +837,13 @@ void LC_RemoteApiServer::serveConnection(const qintptr descriptor, const std::sh
                                          const QDeadlineTimer readDeadline, const QDeadlineTimer clientDeadline) {
     Connection connection(descriptor);
     QByteArray buffer(ReadChunk, Qt::Uninitialized);
+    // RFC 9110 10.1.1: a client that sent "Expect: 100-continue" waits for an
+    // interim 100 (or the final answer) before it sends its body; curl waits a
+    // second for it before every body over 1 MiB. HTTP/1.0 ignores it.
+    if (parser->state() == LC_HttpRequestParser::State::Incomplete && !parser->isHttp10() &&
+        expectsContinue(parser->request()) && !writeAll(descriptor, InterimContinue)) {
+        return; // reset
+    }
     bool timedOut = false;
     while (parser->state() == LC_HttpRequestParser::State::Incomplete) { // the body
         if (m_stop.load()) {
@@ -977,6 +1017,9 @@ std::optional<LC_ApiResponse> LC_RemoteApiServer::refusal(const LC_ApiRequest& r
     const std::optional<QDeadlineTimer> deadline = parseClientDeadline(request);
     if (!deadline.has_value()) {
         return badDeadlineHeader(request);
+    }
+    if (const QByteArray unmet = unmetExpectation(request); !unmet.isEmpty()) {
+        return expectationFailed(unmet);
     }
     if (clientDeadline != nullptr) {
         *clientDeadline = *deadline;

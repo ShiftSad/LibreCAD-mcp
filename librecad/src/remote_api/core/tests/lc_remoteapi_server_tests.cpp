@@ -38,6 +38,7 @@
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -178,6 +179,28 @@ void halfCloseNative(const NativeSocket s) {
 #else
     ::shutdown(s, SHUT_WR);
 #endif
+}
+
+// Reads until the server closes the connection (or the receive timeout passes).
+QByteArray receiveUntilClosed(const NativeSocket s) {
+    QByteArray data;
+    char chunk[4096];
+    for (;;) {
+        const auto n = ::recv(s, chunk, sizeof(chunk), 0);
+        if (n <= 0) {
+            return data;
+        }
+        data.append(chunk, n);
+    }
+}
+
+// Whether the server sent something within ms (without reading it).
+bool readableWithin(const NativeSocket s, const int ms) {
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(s, &set);
+    timeval timeout{ms / 1000, (ms % 1000) * 1000};
+    return ::select(static_cast<int>(s) + 1, &set, nullptr, nullptr, &timeout) > 0;
 }
 
 // How exchange() behaves, and what it saw.
@@ -1051,6 +1074,67 @@ TEST_CASE("Remote API server: the client's deadline caps the wait for LibreCAD",
     CHECK(timer.elapsed() < 5000);
     pumpFor(200);
     CHECK(runs.load() == 0);
+}
+
+TEST_CASE("Remote API server answers Expect: 100-continue before the body", "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start();
+    const QByteArray body = "{\"a\":1}";
+    const QByteArray rest = "Host: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " + fixture.token +
+                            "\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n";
+
+    SECTION("an HTTP/1.1 client that waits with its body is told to send it at once") {
+        // RFC 9110 10.1.1; curl waits a second for it before every body over 1 MiB
+        const NativeSocket s = connectNative(port);
+        REQUIRE(s != NoSocket);
+        QElapsedTimer timer;
+        timer.start();
+        REQUIRE(sendNative(s, "POST /api/v1/echo HTTP/1.1\r\n" + rest + "Expect: 100-continue\r\n\r\n"));
+        REQUIRE(readableWithin(s, 3000));
+        CHECK(timer.elapsed() < 1000);
+        CHECK(receiveNative(s, "\r\n\r\n") == "HTTP/1.1 100 Continue\r\n\r\n");
+        REQUIRE(sendNative(s, body));
+        const QByteArray answer = receiveUntilClosed(s);
+        CHECK(answer.startsWith("HTTP/1.1 201"));
+        CHECK(answer.contains("\"a\":1"));
+        closeNative(s);
+    }
+    SECTION("no interim answer when the body came with the headers") {
+        Exchange options;
+        const HttpReply reply = exchange(port, "POST /api/v1/echo HTTP/1.1\r\n" + rest + "Expect: 100-continue\r\n\r\n" + body,
+                                         10000, &options);
+        CHECK(reply.status == 201);
+        CHECK(options.interim == 0);
+    }
+    SECTION("HTTP/1.0 ignores the expectation") {
+        const NativeSocket s = connectNative(port);
+        REQUIRE(s != NoSocket);
+        REQUIRE(sendNative(s, "POST /api/v1/echo HTTP/1.0\r\n" + rest + "Expect: 100-continue\r\n\r\n"));
+        CHECK_FALSE(readableWithin(s, 500));
+        REQUIRE(sendNative(s, body));
+        CHECK(receiveUntilClosed(s).startsWith("HTTP/1.1 201"));
+        closeNative(s);
+    }
+    SECTION("another expectation is refused at once, and so is a client without the token") {
+        QElapsedTimer timer;
+        timer.start();
+        Exchange options;
+        HttpReply reply = exchange(port, "POST /api/v1/echo HTTP/1.1\r\n" + rest + "Expect: 200-ok\r\n\r\n", 5000, &options);
+        CHECK(reply.status == 417);
+        CHECK(reply.error() == "expectation_failed");
+        CHECK(reply.json.value("header").toString() == "Expect");
+        CHECK(options.interim == 0);
+        CHECK(timer.elapsed() < 2000);
+        // a repeated header arrives joined: still only 100-continue
+        reply = exchange(port, "POST /api/v1/echo HTTP/1.1\r\n" + rest + "Expect: 100-Continue\r\nExpect: 100-continue\r\n\r\n" + body);
+        CHECK(reply.status == 201);
+        // the final status instead of the 100: the client never sends its body
+        options = {};
+        reply = exchange(port, "POST /api/v1/echo HTTP/1.1\r\nHost: 127.0.0.1:" + QByteArray::number(port) +
+                                   "\r\nContent-Length: 7\r\nExpect: 100-continue\r\n\r\n", 5000, &options);
+        CHECK(reply.status == 401);
+        CHECK(options.interim == 0);
+    }
 }
 
 TEST_CASE("Remote API server: a second server cannot take the port", "[remote-api][server]") {

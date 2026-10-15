@@ -57,9 +57,12 @@ class LC_RemoteApiRouter;
  *     the header limit (431); chunked bodies are refused (411);
  *  2. check Host (421 bad_host), then Origin (403 origin_not_allowed), then
  *     the token, X-Api-Token or Authorization: Bearer (401 unauthorized), then
- *     X-Request-Timeout-Ms (400 bad_header), as soon as the headers are in: a
- *     refused client never sends its body;
+ *     X-Request-Timeout-Ms (400 bad_header), then Expect (417
+ *     expectation_failed for anything but 100-continue), as soon as the
+ *     headers are in: a refused client never sends its body;
  *  3. read the body within the read timeout (408), with the body limit (413);
+ *     an HTTP/1.1 client that sent "Expect: 100-continue" is sent
+ *     "100 Continue" first, unless its body is already in;
  *  4. queue it for the dispatcher, which calls router.dispatch() (GUI routes
  *     run on the GUI thread). While it waits, the reader watches the client:
  *     - X-Request-Timeout-Ms (the client's own deadline, in ms) caps the wait:

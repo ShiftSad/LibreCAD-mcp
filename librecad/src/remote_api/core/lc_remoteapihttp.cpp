@@ -265,6 +265,7 @@ QByteArray reasonPhrase(const int status) {
         case 409: return "Conflict";
         case 411: return "Length Required";
         case 413: return "Content Too Large";
+        case 417: return "Expectation Failed";
         case 421: return "Misdirected Request";
         case 422: return "Unprocessable Content";
         case 431: return "Request Header Fields Too Large";
