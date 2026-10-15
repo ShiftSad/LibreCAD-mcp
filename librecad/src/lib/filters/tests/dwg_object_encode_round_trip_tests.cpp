@@ -11168,6 +11168,84 @@ TEST_CASE("DRW_CellStyleMap rejects a truncated common handle stream",
     CHECK(parsed.m_cellStyles.empty());
 }
 
+TEST_CASE("DRW_CellStyleMap reads legacy cell styles with a real object size",
+          "[dwg-read][object-encode][cellstylemap]") {
+    // AutoCAD writes every cell style color in the true-color CMC form, even
+    // in R2000, and back-patches the object size to the handle stream start.
+    for (const DRW::Version ver : {DRW::AC1015, DRW::AC1018}) {
+        CAPTURE(static_cast<int>(ver));
+        dwgBufferW encoded;
+        emitObjectPreamble(encoded, ver, /*oType=*/603, /*handle=*/0xB13,
+                           /*numReactors=*/1, /*xDictFlag=*/0);
+        encoded.putBitLong(1);               // num_cells
+        encoded.putBitLong(5);               // cell style type
+        encoded.putBitShort(1);              // data flags
+        encoded.putBitLong(0);               // property override flags
+        encoded.putBitLong(0x8000);          // merge flags
+        encoded.putCmColor(DRW::AC1018, 0);  // background color (ByBlock)
+        encoded.putBitLong(1);               // content layout
+        encoded.putBitLong(0);               // format property overrides
+        encoded.putBitLong(0);               // format property flags
+        encoded.putBitLong(512);             // value data type
+        encoded.putBitLong(0);               // value unit type
+        encoded.putVariableText(ver, "");    // value format string
+        encoded.putBitDouble(0.0);           // rotation
+        encoded.putBitDouble(1.0);           // block scale
+        encoded.putBitLong(5);               // cell alignment
+        encoded.putCmColor(DRW::AC1018, 7);  // content color
+        encoded.putBitDouble(0.25);          // text height
+        encoded.putBitShort(0);              // no margin overrides
+        encoded.putBitLong(1);               // num_borders
+        encoded.putBitLong(1);               // border edge mask
+        encoded.putBitLong(0);               // border overrides
+        encoded.putBitLong(1);               // border type
+        encoded.putCmColor(DRW::AC1018, 3);  // border color
+        encoded.putBitLong(-2);              // line weight
+        encoded.putBitLong(1);               // visible
+        encoded.putBitDouble(0.045);         // double line spacing
+        encoded.putBitLong(1);               // style id
+        encoded.putBitLong(1);               // style class
+        encoded.putVariableText(ver, "_TITLE");
+        encoded.patchRawLong32AtBit(objectSizeBitOffset(encoded),
+                                    encoded.bitCount());
+
+        encoded.putHandle(hardPtr(0x70));
+        encoded.putHandle(handleWithCode(0x0A, 0x71));
+        encoded.putHandle(handleWithCode(0x0A, 0x72));
+        encoded.putHandle(hardPtr(0x11)); // content text style
+        encoded.putHandle(hardPtr(0x14)); // border linetype
+
+        auto bytes = snapshot(encoded);
+        dwgBuffer reader(bytes.data(), bytes.size());
+        DRW_CellStyleMap parsed;
+        REQUIRE(DrwObjectEncodeTestAccess::parse(parsed, ver, &reader));
+        CHECK(static_cast<std::uint32_t>(parsed.parentHandle) == 0x70u);
+        CHECK(parsed.reactorHandles == std::vector<std::uint32_t>{0x71u});
+        CHECK(parsed.xDictHandle == 0x72u);
+        REQUIRE(parsed.m_cellStyles.size() == 1u);
+        const DRW_TableStyleCellStyle& style = parsed.m_cellStyles.front();
+        CHECK(style.m_type == 5);
+        CHECK(style.m_hasData);
+        CHECK(style.m_mergeFlags == 0x8000u);
+        CHECK(style.m_backgroundColor == 0);
+        CHECK(style.m_contentLayout == 1u);
+        CHECK(style.m_contentFormat.m_valueDataType == 512);
+        CHECK(style.m_contentFormat.m_cellAlignment == 5);
+        CHECK(style.m_contentFormat.m_contentColor == 7);
+        CHECK(style.m_contentFormat.m_textStyleHandle == 0x11u);
+        CHECK(style.m_contentFormat.m_textHeight == Approx(0.25));
+        REQUIRE(style.m_borders.size() == 1u);
+        CHECK(style.m_borders.front().m_edgeFlags == 1);
+        CHECK(style.m_borders.front().m_color == 3);
+        CHECK(style.m_borders.front().m_lineWeight == -2);
+        CHECK(style.m_borders.front().m_lineTypeHandle == 0x14u);
+        CHECK(style.m_borders.front().m_doubleLineSpacing == Approx(0.045));
+        CHECK(style.m_id == 1);
+        CHECK(style.m_styleClass == 1);
+        CHECK(style.m_name == "_TITLE");
+    }
+}
+
 TEST_CASE("DRW_IDBuffer captures common and object handles",
           "[dwg-read][object-encode][idbuffer]") {
     const DRW::Version ver = DRW::AC1018;

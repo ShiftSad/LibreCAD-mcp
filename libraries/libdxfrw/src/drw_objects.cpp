@@ -1715,9 +1715,14 @@ bool readTableStyleCellStyle(DRW::Version version, dwgBuffer *buf,
         return readBitDoubleWithinBody(buf, version, bodySize, value)
             && std::isfinite(value);
     };
-    const auto readColor = [buf, strBuf, version, bodySize, stringSize](int& value) {
+    // Cell style background and border colors are the true-color CMC form
+    // even in AC1015, like the content format color (LibreDWG FIELD_CMTC).
+    const DRW::Version colorVersion =
+        version < DRW::AC1018 ? DRW::AC1018 : version;
+    const auto readColor = [buf, strBuf, colorVersion, bodySize,
+                            stringSize](int& value) {
         std::uint32_t parsed = 0;
-        if (!readCmColorWithinBounds(buf, strBuf ? strBuf : buf, version,
+        if (!readCmColorWithinBounds(buf, strBuf ? strBuf : buf, colorVersion,
                                      bodySize, stringSize, parsed))
             return false;
         value = static_cast<int>(parsed);
@@ -13523,8 +13528,8 @@ bool DRW_CellStyleMap::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint3
     if (!resolveR2007StreamBounds(version, bodyStringBuff, objSize, bodyEnd, stringEnd))
         return fail();
 
-    // The body cursor reaches the inline handle stream for R2000/R2004;
-    // R2007+ uses the separate absolute objSize boundary.
+    // Handles start at the absolute objSize boundary: R2007+ reads them
+    // alongside the body, R2000/R2004 once the body has been read.
     dwgBuffer hBuff = *buf;
     dwgBuffer *hBuf = (version > DRW::AC1018) ? &hBuff : buf;
     std::uint64_t handleEndBit = 0;
@@ -13584,10 +13589,17 @@ bool DRW_CellStyleMap::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint3
     }
 
     if (version <= DRW::AC1018) {
-        if (!this->readDwgObjectCommonHandles(version, bodyBuf, &parsedParentHandle, &parsedReactors, &parsedXDictHandle))
+        // Read the handles from their own cursor at the objSize boundary
+        // (inline after the body for a zero-sized carrier) so the body
+        // cursor still marks the end of the data for the check below.
+        dwgBuffer legacyHandles = *bodyBuf;
+        seekObjectHandleStream(version, &legacyHandles, objSize);
+        if (!legacyHandles.isGood()
+            || !this->readDwgObjectCommonHandles(version, &legacyHandles, &parsedParentHandle, &parsedReactors, &parsedXDictHandle))
             return fail();
         for (DRW_TableStyleCellStyle& style : cellStyles) {
-            if (!readTableStyleCellStyleHandles(bodyBuf, style, handleEndBit))
+            if (!readTableStyleCellStyleHandles(&legacyHandles, style,
+                                                handleEndBit))
                 return fail();
         }
     }
