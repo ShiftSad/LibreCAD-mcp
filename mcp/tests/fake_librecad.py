@@ -38,7 +38,33 @@ PNG_1X1 = tiny_png()
 OPEN_EXT = (".dxf", ".dwg", ".lff", ".cxf", ".jww", ".jwc", ".shp")
 DXF_VERSIONS = ["R12", "R14", "2000", "2004", "2007", "2010", "2013", "2018"]
 DWG_VERSIONS = ["2000", "2004", "2007", "2010", "2013", "2018"]
-DWG_ALIASES = {"2026": "2018", "AC1032": "2018", "R2000": "2000"}
+# The AutoCAD version code of each version name, as LibreCAD's format table has it.
+ACAD = {"R12": "AC1009", "R14": "AC1014", "2000": "AC1015", "2004": "AC1018", "2007": "AC1021",
+        "2010": "AC1024", "2013": "AC1027", "2018": "AC1032"}
+
+
+def version_label(fmt: str, version: str) -> str:
+    """LibreCAD's label of a version, e.g. "AutoCAD 2018-2026 (AC1032)" or "DXF R12 (AC1009)"."""
+    name = f"{version}-2026" if version == "2018" else version
+    return f"{'AutoCAD' if fmt == 'dwg' else 'DXF'} {name} ({ACAD[version]})"
+
+
+def version_aliases(versions: list[str]) -> dict[str, str]:
+    """Other names LibreCAD accepts for a version: the AutoCAD code (AC1032), the R-spelling
+    (R2000) and, for AC1032, every AutoCAD release that still writes it (2019..2026)."""
+    out: dict[str, str] = {}
+    for v in versions:
+        out[ACAD[v]] = v
+        if not v.startswith("R"):
+            out["R" + v] = v
+        if ACAD[v] == "AC1032":
+            out.update({str(year): v for year in range(2019, 2027)})
+    return out
+
+
+DXF_ALIASES = version_aliases(DXF_VERSIONS)
+DWG_ALIASES = version_aliases(DWG_VERSIONS)
+DEFAULT_VERSION = {"dxf": "2007", "dwg": "2018"}
 EXT = {"dxf": ".dxf", "dwg": ".dwg", "pdf": ".pdf", "png": ".png", "svg": ".svg"}
 CAPABILITIES = ["status", "routes", "documents", "export", "export_dwg", "export_pdf", "drawing", "render",
                 "view", "undo", "command", "layers", "blocks", "entities", "transform", "selection", "measure"]
@@ -51,7 +77,8 @@ TYPE_FIELDS = {
     "point": {"position"},
     "polyline": {"vertices", "closed"},
     "spline": {"control_points", "degree", "fit_points", "closed"},
-    "text": {"position", "text", "height", "angle_deg", "halign", "valign", "style", "width_factor"},
+    "text": {"position", "text", "height", "angle_deg", "halign", "valign", "style", "width_factor",
+             "second_point"},
     "mtext": {"position", "text", "height", "width", "angle_deg", "attachment", "line_spacing", "style"},
     "dimension": {"dim_type", "p1", "p2", "line_point", "angle_deg", "center", "point", "leader_length",
                   "opposite_point", "line1", "line2", "arc_point", "text", "style"},
@@ -62,7 +89,12 @@ POINT_KEYS = ("start", "end", "center", "position", "p1", "p2", "line_point", "p
               "arc_point")
 POINT_LIST_KEYS = ("vertices", "control_points", "fit_points")
 LAYER_NAME_BAD = re.compile(r'[<>/\\":;?*|,=`]')
-COMMANDS = ["line", "circle", "arc", "polyline", "zoomauto", "zoomin", "select", "move", "escape"]
+# /commands lists LibreCAD's main command names only; /command also takes their aliases.
+COMMANDS = ["arc", "circle", "line2p", "move", "polyline", "select", "zoomauto", "zoomin"]
+COMMAND_ALIASES = {"line": "line2p", "li": "line2p", "l": "line2p", "ci": "circle", "za": "zoomauto"}
+# Lineweights LibreCAD accepts, in mm (anything else is refused with this list as "allowed").
+LINEWEIGHTS_MM = [0.0, 0.05, 0.09, 0.13, 0.15, 0.18, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.53, 0.6, 0.7,
+                  0.8, 0.9, 1.0, 1.06, 1.2, 1.4, 1.58, 2.0, 2.11]
 
 
 class FakeError(Exception):
@@ -93,6 +125,7 @@ def need(body: dict, key: str):
 class Doc:
     def __init__(self, doc_id: int, name: str, path: str | None = None, fmt: str | None = None):
         self.id, self.name, self.path, self.fmt = doc_id, name, path, fmt
+        self.version = DEFAULT_VERSION.get(fmt or "", None)
         self.modified = False
         self.entities: dict[int, dict] = {}
         self.layers: dict[str, dict] = {"0": self._layer("0")}
@@ -122,7 +155,7 @@ class FakeLibreCAD:
         self.calls: list[dict] = []
         self.docs: dict[int, Doc] = {}
         self.active: int | None = None
-        self.next_doc = 1
+        self.next_doc = 0   # LibreCAD's document ids start at 0 (QC_MDIWindow::getId)
         self.next_entity = 100
         self.allow_commands = True
         self.dwg_support = True
@@ -260,7 +293,7 @@ class FakeLibreCAD:
     def doc_json(self, d: Doc) -> dict:
         fmt = None
         if d.fmt:
-            fmt = {"format": d.fmt, "version": "2018", "label": "AutoCAD 2018-2026 (AC1032)" if d.fmt == "dwg" else "DXF 2018"}
+            fmt = {"format": d.fmt, "version": d.version, "label": version_label(d.fmt, d.version)}
         return {"id": d.id, "name": d.name, "path": d.path, "modified": d.modified, "active": d.id == self.active,
                 "format": fmt, "entity_count": len(d.entities)}
 
@@ -282,9 +315,11 @@ class FakeLibreCAD:
 
     def h_formats(self, q, body):
         return {"open": list(OPEN_EXT),
-                "save": [{"format": "dxf", "versions": DXF_VERSIONS, "default": "2007"},
-                         {"format": "dwg", "versions": DWG_VERSIONS, "default": "2018",
-                          "labels": {"2018": "AutoCAD 2018-2026 (AC1032)"}, "aliases": DWG_ALIASES}],
+                "save": [{"format": fmt, "versions": versions, "default": DEFAULT_VERSION[fmt],
+                          "labels": {v: version_label(fmt, v) for v in versions}, "aliases": aliases,
+                          "extension": EXT[fmt]}
+                         for fmt, versions, aliases in (("dxf", DXF_VERSIONS, DXF_ALIASES),
+                                                        ("dwg", DWG_VERSIONS, DWG_ALIASES))],
                 "export": ["dxf", "dwg", "pdf", "png", "svg"]}
 
     def h_documents(self, q, body):
@@ -333,7 +368,8 @@ class FakeLibreCAD:
         with open(d.path, "wb") as fh:
             fh.write(b"0\nSECTION\n")
         d.modified = False
-        return {"document": self.doc_json(d), "path": d.path, "format": d.fmt or "dxf", "left_out": []}
+        return {"document": self.doc_json(d), "path": d.path, "format": d.fmt, "version": d.version,
+                "label": version_label(d.fmt, d.version), "left_out": []}
 
     def _write_target(self, body, formats, versions_for):
         path = need(body, "path")
@@ -347,7 +383,7 @@ class FakeLibreCAD:
             raise FakeError(501, "dwg_unsupported")
         version = body.get("version")
         if version is not None and fmt in versions_for:
-            version = DWG_ALIASES.get(version, version) if fmt == "dwg" else version
+            version = (DWG_ALIASES if fmt == "dwg" else DXF_ALIASES).get(version, version)
             if version not in versions_for[fmt]:
                 raise FakeError(422, "bad_param", "unknown version", param="version", allowed=versions_for[fmt])
         if not os.path.isdir(os.path.dirname(path)):
@@ -363,8 +399,9 @@ class FakeLibreCAD:
         with open(path, "wb") as fh:
             fh.write(b"AC1032" if fmt == "dwg" else b"0\nSECTION\n")
         d.path, d.name, d.fmt, d.modified = path, os.path.basename(path), fmt, False
-        return {"document": self.doc_json(d), "path": path, "format": fmt,
-                "version": version or ("2018" if fmt == "dwg" else "2007"), "left_out": []}
+        d.version = version or DEFAULT_VERSION[fmt]
+        return {"document": self.doc_json(d), "path": path, "format": fmt, "version": d.version,
+                "label": version_label(fmt, d.version), "left_out": []}
 
     def h_export(self, q, body):
         allow_only(body, {"path", "format", "version", "overwrite", "width", "height", "margin_px",
@@ -372,14 +409,17 @@ class FakeLibreCAD:
         d = self.doc(q)
         path, fmt, version = self._write_target(body, ["dxf", "dwg", "pdf", "png", "svg"],
                                                 {"dxf": DXF_VERSIONS, "dwg": DWG_VERSIONS})
+        if d.path and os.path.normcase(d.path) == os.path.normcase(path):
+            raise FakeError(409, "file_open_in_other_window",
+                            "the drawing itself is stored in this file; use save or save_as", path=path)
         data = {"pdf": b"%PDF-1.4\n%fake\n", "png": PNG_1X1, "svg": b"<svg xmlns='http://www.w3.org/2000/svg'/>",
                 "dxf": b"0\nSECTION\n", "dwg": b"AC1032"}[fmt]
         with open(path, "wb") as fh:
             fh.write(data)
         out = {"path": path, "format": fmt, "bytes": len(data), "left_out": []}
         if fmt in ("dxf", "dwg"):
-            out["version"] = version or ("2018" if fmt == "dwg" else "2007")
-        _ = d
+            out["version"] = version or DEFAULT_VERSION[fmt]
+            out["label"] = version_label(fmt, out["version"])
         return out
 
     def h_close(self, q, body):
@@ -491,8 +531,9 @@ class FakeLibreCAD:
         inputs = body.get("inputs", [])
         if not isinstance(cmd, str) or not cmd.strip() or any(not str(i).strip() for i in inputs):
             raise FakeError(400, "bad_param", "empty command or input", param="command")
-        if cmd not in COMMANDS:
-            return {"executed": [], "output": [f"Unknown command: {cmd}"], "prompt": "Command:",
+        main = COMMAND_ALIASES.get(cmd.lower(), cmd.lower())
+        if main not in COMMANDS:
+            return {"executed": [cmd, *inputs], "output": [f"Unknown command: {cmd}"], "prompt": "Command:",
                     "active_action": None, "unknown_commands": [cmd]}
         output = [f"Command: {cmd}"]
         points: list[list[float]] = []
@@ -503,11 +544,11 @@ class FakeLibreCAD:
             rel = raw.startswith("@")
             x, y = (float(v) for v in raw.lstrip("@").split(","))
             p = [points[-1][0] + x, points[-1][1] + y] if rel and points else [x, y]
-            if cmd == "line" and points:
+            if main == "line2p" and points:
                 d.snapshot()
                 self._store(d, {"type": "line", "start": points[-1], "end": p}, d.current_layer)
             points.append(p)
-        output.append("Specify first point" if cmd == "line" else "")
+        output.append("Specify first point" if main == "line2p" else "")
         return {"executed": [cmd, *inputs], "output": output, "prompt": "Command:",
                 "active_action": None, "unknown_commands": []}
 
@@ -599,6 +640,11 @@ class FakeLibreCAD:
         ids = [i for i, e in d.entities.items() if e["layer"] == name]
         if ids and policy == "refuse":
             raise FakeError(409, "layer_not_empty", entity_count=len(ids))
+        if ids and d.layers[name]["locked"]:
+            raise FakeError(409, "layer_locked", f"layer '{name}' is locked; unlock it before deleting it with "
+                            "its entities", layer=name)
+        if ids and policy == "move" and self._layer(d, move_to)["locked"]:
+            raise FakeError(409, "layer_locked", f"layer '{move_to}' is locked", layer=move_to)
         moved = deleted = 0
         if ids and policy == "move":
             self._layer(d, move_to)
@@ -674,6 +720,32 @@ class FakeLibreCAD:
             e["length"], e["area"] = 2 * math.pi * r, math.pi * r * r
         if e["type"] == "polyline":
             e["vertex_count"] = len(e["vertices"])
+        if e["type"] == "dimension":
+            e["measurement"] = self._measurement(e)
+
+    @staticmethod
+    def _measurement(e: dict) -> float | None:
+        """What LibreCAD's dimension measures: a length, or degrees for an angular one."""
+        def dist(a, b):
+            return math.hypot(b[0] - a[0], b[1] - a[1])
+        kind = e.get("dim_type")
+        if kind == "linear":
+            a = math.radians(e.get("angle_deg") or 0)
+            dx, dy = e["p2"][0] - e["p1"][0], e["p2"][1] - e["p1"][1]
+            return abs(dx * math.cos(a) + dy * math.sin(a))
+        if kind == "aligned":
+            return dist(e["p1"], e["p2"])
+        if kind == "radial":
+            return dist(e["center"], e["point"])
+        if kind == "diametric":
+            return dist(e["point"], e["opposite_point"])
+        if kind == "angular":
+            (a1, a2), (b1, b2) = e["line1"], e["line2"]
+            t1 = math.atan2(a2[1] - a1[1], a2[0] - a1[0])
+            t2 = math.atan2(b2[1] - b1[1], b2[0] - b1[0])
+            deg = abs(math.degrees(t2 - t1)) % 360
+            return min(deg, 360 - deg)
+        return None
 
     def _extents(self, entities) -> dict | None:
         boxes = [e["bbox"] for e in entities if "bbox" in e]
@@ -729,8 +801,12 @@ class FakeLibreCAD:
             raise FakeError(404, "unknown_entity", ids=[i])
         return {"entity": d.entities[i]}
 
-    def _validate_spec(self, i: int, spec: dict, errors: dict) -> None:
+    def _validate_spec(self, i: int, spec: dict, errors: dict, allowed: dict) -> None:
         t = spec.get("type")
+        lw = spec.get("lineweight")
+        if isinstance(lw, (int, float)) and not any(abs(lw - w) < 0.005 for w in LINEWEIGHTS_MM):
+            errors[f"entities[{i}].lineweight"] = "not a standard lineweight"
+            allowed[f"entities[{i}].lineweight"] = ["ByLayer", "ByBlock", "Default", *LINEWEIGHTS_MM]
         if t not in TYPE_FIELDS:
             errors[f"entities[{i}].type"] = "unknown entity type"
             return
@@ -743,6 +819,8 @@ class FakeLibreCAD:
             errors[f"entities[{i}].vertices"] = "needs at least 2 vertices"
         if t in ("text", "mtext") and spec.get("style", "standard") != "standard":
             errors[f"entities[{i}].style"] = "unknown text style"
+        if t == "text" and spec.get("halign") in ("aligned", "fit") and "second_point" not in spec:
+            errors[f"entities[{i}].second_point"] = "aligned and fit text need a second_point"
 
     def h_create(self, q, body):
         allow_only(body, {"entities", "layer", "select"})
@@ -751,10 +829,19 @@ class FakeLibreCAD:
         if len(specs) > 5000:
             raise FakeError(422, "too_many", limit=5000)
         errors: dict = {}
+        allowed: dict = {}
         for i, spec in enumerate(specs):
-            self._validate_spec(i, spec, errors)
+            self._validate_spec(i, spec, errors, allowed)
         if errors:
-            raise FakeError(422, "invalid_entity", errors=errors)
+            # one 422 for the batch: the reason per field path, and the accepted values where known
+            extra = {"errors": errors, **({"allowed": allowed} if allowed else {})}
+            raise FakeError(422, "invalid_entity", f"{len(errors)} of {len(specs)} entity specs are invalid; "
+                            "nothing was created", **extra)
+        for i, spec in enumerate(specs):
+            # not a spec error: the whole request is 404, and nothing is created
+            if spec.get("type") == "insert" and spec.get("block") not in d.blocks:
+                raise FakeError(404, "unknown_block", f"no block named '{spec.get('block')}'",
+                                name=spec.get("block"), param=f"entities[{i}].block")
         layers = [s.get("layer") or body.get("layer") or d.current_layer for s in specs]
         for layer in layers:
             self._check_layer_writable(d, layer)

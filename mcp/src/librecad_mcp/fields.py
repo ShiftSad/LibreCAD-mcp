@@ -54,8 +54,9 @@ _LAYER_COLOR = Field(description='Layer color: "#rrggbb" or an AutoCAD color ind
 _COLOR = Field(description='Entity color: "ByLayer", "ByBlock", "#rrggbb" or an AutoCAD color index 1..255.')
 _LINETYPE = Field(description='Linetype name, e.g. "Continuous", "Dashed", "DashDot", "Center", '
                               '"Hidden", "Dot", or "ByLayer"/"ByBlock" for entities.')
-_LINEWEIGHT_MM = Field(description='Lineweight in millimetres (0.25, 0.35, 0.5, ...; snapped to the '
-                                   'standard width), or "ByLayer"/"ByBlock"/"Default".')
+_LINEWEIGHT_MM = Field(description='Lineweight in millimetres, one of the standard widths (0.25, 0.35, '
+                                   '0.5, ...; other values are refused with the list), or '
+                                   '"ByLayer"/"ByBlock"/"Default".')
 _TYPES = Field(description="Only these entity types (any of them).")
 _LAYERS = Field(description="Only entities on these layers (any of them); exact names.")
 _BBOX_MIN = Field(description="Lower-left corner [x, y] of an area filter; give bbox_max too.")
@@ -172,7 +173,8 @@ class SplineSpec(_Attrs):
 
 
 class TextSpec(_Attrs):
-    """Single-line text. position is the alignment point."""
+    """Single-line text. position is the alignment point. halign "aligned" or "fit" also needs
+    second_point, the other end of the baseline."""
     type: Literal["text"]
     position: Point
     text: Annotated[str, Field(min_length=1)]
@@ -182,6 +184,16 @@ class TextSpec(_Attrs):
     valign: Literal["baseline", "bottom", "middle", "top"] = "baseline"
     style: str = "standard"
     width_factor: PositiveNum = 1.0
+    second_point: Point | None = Field(None, description='End of the baseline; required for halign "aligned" or "fit".')
+
+    @model_validator(mode="after")
+    def _second_point(self):
+        if self.halign in ("aligned", "fit"):
+            if self.second_point is None:
+                raise ValueError(f'halign "{self.halign}" needs second_point (the end of the baseline)')
+            if self.second_point == self.position:
+                raise ValueError("second_point must differ from position")
+        return self
 
 
 class MTextSpec(_Attrs):

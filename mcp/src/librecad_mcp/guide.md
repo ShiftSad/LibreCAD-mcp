@@ -19,10 +19,10 @@ No drawing open? `new_document` or `open_document`.
 |---|---|
 | Coordinates | Drawing units (see `units` in `get_drawing_info`; often mm). Points are `[x, y]`. |
 | Angles | **Degrees**, counter-clockwise from +X, in every field named `*_deg`. |
-| Lineweights | Millimetres (0.25, 0.35, 0.5, ...), snapped to a standard width, or `"ByLayer"`. |
+| Lineweights | Millimetres, one of the standard widths (0.25, 0.35, 0.5, ...; others are refused with the list in `allowed`), or `"ByLayer"`. |
 | Colors | `"ByLayer"`, `"ByBlock"`, `"#rrggbb"`, or an AutoCAD color index 1..255 (1 red, 2 yellow, 3 green, 4 cyan, 5 blue, 6 magenta, 7 white/black). Layers take `#rrggbb` or an index. |
 | Pixel sizes | `*_px`. |
-| Drawing ids | `document_id` is the `id` from `list_documents`. Omit it for the active drawing. |
+| Drawing ids | `document_id` is the `id` from `list_documents` (LibreCAD counts from 0, so 0 is a real drawing). Omit it for the active drawing. |
 | Entity ids | `id` from `query_entities` / `add_entities`. An id stays the same when the entity is edited, moved or undone; copies get new ids. |
 
 Only model space is addressable; paper-space layouts are not in this version.
@@ -49,14 +49,18 @@ All entities accept `layer`, `color`, `linetype` and `lineweight`. Without them 
 | `point` | `position` |
 | `polyline` | `vertices`: `[x, y]` or `[x, y, bulge]` (at least 2), `closed` (false). bulge = tan(arc angle / 4), + counter-clockwise |
 | `spline` | either `control_points` (at least degree + 1) and `degree` (3; 1..3), or `fit_points` (at least 2); `closed` |
-| `text` | `position`, `text`, `height` > 0, `angle_deg` (0), `halign` (left, center, right, aligned, middle, fit), `valign` (baseline, bottom, middle, top), `style` ("standard"), `width_factor` (1) |
+| `text` | `position`, `text`, `height` > 0, `angle_deg` (0), `halign` (left, center, right, aligned, middle, fit), `valign` (baseline, bottom, middle, top), `style` ("standard"), `width_factor` (1); `second_point` (end of the baseline) is required for `aligned` and `fit` |
 | `mtext` | `position`, `text` (`\P` = new line), `height`, `width` (0 = no wrap), `angle_deg`, `attachment` (top_left ... bottom_right), `line_spacing` (1), `style` |
 | `dimension` | `dim_type` `linear`: `p1`, `p2`, `line_point`, `angle_deg` (0 horizontal, 90 vertical); `aligned`: `p1`, `p2`, `line_point`; `radial`: `center`, `point`, `leader_length`; `diametric`: `point`, `opposite_point`; `angular`: `line1`, `line2` (each two points), `arc_point`. All: `text` ("" = measured value), `style` |
 | `hatch` | `pattern` ("SOLID", or e.g. "ANSI31"), `scale` (1), `angle_deg` (0), and either `boundary` (loops of points, or `{vertices, closed}`) or `boundary_ids` (ids of closed entities) |
 | `insert` | `block`, `position`, `scale` (1 or `[sx, sy]`), `angle_deg`, `columns`, `rows`, `spacing` |
 
 `add_entities` is atomic: if one spec is wrong, nothing is created, and the reply's `errors` names
-each bad field (`entities[2].radius`).
+each bad field (`entities[2].radius`); `allowed` gives the accepted values of a field when
+LibreCAD has a list (lineweights, alignments, ...).
+
+Read back, an `insert`'s `scale` is always `[sx, sy]`, a full ellipse has angles 0 and 360, and
+angles are in [0, 360).
 
 Read-only types you may meet in `query_entities`: `image`, `leader`, `mleader`, `solid`,
 `parabola`, `hyperbola`, `other`.
@@ -70,9 +74,10 @@ Read-only types you may meet in `query_entities`: `image`, `leader`, `mleader`, 
   rotate, scale, mirror, optionally as copies) or `delete_entities`; `undo` if it went wrong.
 - **Convert**: `open_document`, `export_document` (DXF R12..2018, DWG 2000..2018, where 2018
   means the AutoCAD 2018-2026 format AC1032; PDF, PNG, SVG), `close_document`.
-- **Command line**: `run_command` types LibreCAD commands (`list_commands`), such as
-  `"line"` with inputs `["0,0", "@100,0", "escape"]`. Prefer the dedicated tools; they are atomic
-  and report ids.
+- **Command line**: `run_command` types LibreCAD commands, such as `"line"` with inputs
+  `["0,0", "@100,0", "escape"]`. `list_commands` lists the main names only (`line2p` for that
+  line); aliases such as `line`, `li` or `l` work too. Prefer the dedicated tools; they are
+  atomic and report ids.
 
 ## Errors
 
@@ -87,7 +92,9 @@ Tools never fail with an exception: problems come back as `{"error": "<token>", 
 | `ui_timeout` / `timed_out` | LibreCAD was busy. Check the state before retrying. |
 | `no_document` / `unknown_document` | Open or create a drawing; check ids with `list_documents`. |
 | `unknown_entity` / `unknown_layer` / `unknown_block` | Wrong id or name. |
-| `invalid_entity` | A spec was rejected; nothing was created. See `errors`. |
+| `ambiguous_id` | Two entities share the id (a block reference copied in the GUI); find them by area or layer. |
+| `invalid_entity` | A spec was rejected; nothing was created. See `errors` (and `allowed`). |
+| `too_many` | More than 5000 entities or ids in one call (see `limit`); split it. |
 | `layer_locked` / `entity_locked` | The layer is locked. Ask the user before unlocking. |
 | `file_exists` | Pass `overwrite=True` only after the user agreed. |
 | `unsaved_changes` | Save first, or ask the user before discarding. |

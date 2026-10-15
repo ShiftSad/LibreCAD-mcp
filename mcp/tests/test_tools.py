@@ -185,7 +185,9 @@ async def test_save_as_and_save(fake, doc, tmp_path):
     assert out["path"] == str(target) and out["version"] == "2018" and target.read_bytes() == b"AC1032"
     assert requests(fake, "POST", "/documents/save_as")[-1]["body"] == {
         "path": str(target), "format": "dwg", "version": "2026", "overwrite": False}
-    assert (await srv.save_document())["path"] == str(target)
+    saved = await srv.save_document()
+    assert saved["path"] == str(target) and saved["format"] == "dwg" and saved["version"] == "2018"
+    assert saved["label"] == out["label"] == "AutoCAD 2018-2026 (AC1032)"
     bad = await srv.save_document_as(str(tmp_path / "x.dxf"), format="dxf", version="R99")
     assert bad["error"] == "bad_param" and "R12" in bad["allowed"]
 
@@ -204,8 +206,26 @@ async def test_export_formats(fake, doc, tmp_path):
     assert b"<svg" in (tmp_path / "a.svg").read_bytes()
     dxf = await srv.export_document(str(tmp_path / "r12.dxf"), "dxf", version="R12")
     assert dxf["version"] == "R12" and doc.path is None  # a copy: the drawing keeps its (lack of) file
+    assert dxf["label"] == "DXF R12 (AC1009)"
     assert requests(fake, "POST", "/documents/export")[-1]["body"] == {
         "path": str(tmp_path / "r12.dxf"), "format": "dxf", "overwrite": False, "version": "R12"}
+
+
+async def test_export_over_the_drawings_own_file_is_refused(fake, doc, tmp_path):
+    own = tmp_path / "own.dxf"
+    await srv.save_document_as(str(own))
+    out = await srv.export_document(str(own), "dxf", overwrite=True, user_confirmed=True)
+    assert out["error"] == "file_open_in_other_window" and "save_document" in out["hint"]
+
+
+async def test_document_id_0_is_a_document(fake):
+    """LibreCAD numbers drawings from 0: id 0 must reach it as ?doc=0, not mean "the active one"."""
+    first = (await srv.new_document())["document"]["id"]
+    await srv.new_document()  # now the active one
+    assert first == 0
+    info = await srv.get_drawing_info(0)
+    assert info["document"]["id"] == 0
+    assert requests(fake, "GET", "/drawing")[-1]["query"] == {"doc": ["0"]}
 
 
 async def test_export_refusals(fake, doc, tmp_path):
@@ -372,6 +392,40 @@ async def test_add_entities_reports_librecads_own_refusal(fake, doc):
     assert out["error"] == "layer_locked" and out["layer"] == "locked"
 
 
+async def test_an_insert_of_a_missing_block_creates_nothing(fake, doc):
+    out = await call("add_entities", {"entities": [
+        {"type": "line", "start": [0, 0], "end": [1, 1]},
+        {"type": "insert", "block": "ghost", "position": [0, 0]}]})
+    assert out["error"] == "unknown_block" and out["name"] == "ghost" and "list_blocks" in out["hint"]
+    assert len(doc.entities) == 0
+
+
+async def test_dimensions_report_their_measurement(fake, doc):
+    out = await call("add_entities", {"entities": [
+        {"type": "dimension", "dim_type": "linear", "p1": [0, 0], "p2": [30, 40], "line_point": [0, -5]},
+        {"type": "dimension", "dim_type": "aligned", "p1": [0, 0], "p2": [30, 40], "line_point": [0, 5]}]})
+    assert [round(e["measurement"], 6) for e in out["created"]] == [30, 50]
+
+
+async def test_text_second_point(fake, doc):
+    aligned = {"type": "text", "position": [0, 0], "text": "x", "height": 1, "halign": "aligned"}
+    result = await call_raw("add_entities", {"entities": [aligned]})
+    assert result.is_error and "second_point" in result.content[0].text
+    assert requests(fake, "POST", "/entities") == []
+    out = await call("add_entities", {"entities": [{**aligned, "second_point": [10, 0]}]})
+    assert out["created"][0]["second_point"] == [10, 0]
+    assert requests(fake, "POST", "/entities")[-1]["body"]["entities"][0]["second_point"] == [10, 0]
+
+
+async def test_invalid_entity_passes_on_the_allowed_values(fake, doc):
+    out = await call("add_entities", {"entities": [
+        {"type": "point", "position": [0, 0]},
+        {"type": "line", "start": [0, 0], "end": [1, 1], "lineweight": 0.33}]})
+    assert out["error"] == "invalid_entity" and list(out["errors"]) == ["entities[1].lineweight"]
+    assert 0.35 in out["allowed"]["entities[1].lineweight"] and "allowed" in out["hint"]
+    assert len(doc.entities) == 0
+
+
 async def test_query_and_get_entities(fake, doc):
     await srv.create_layer("walls")
     created = await call("add_entities", {"entities": [
@@ -511,12 +565,20 @@ async def test_run_command(fake, doc):
     assert (await srv.run_command("line", ["0,0", " "]))["param"] == "inputs[1]"
     assert (await srv.run_command("line", ["0,0\n1,1"]))["error"] == "bad_param"
     assert (await srv.run_command("   "))["error"] == "bad_param"
+    # /commands lists the main names only ("line2p"); aliases such as "line" or "li" still run
+    commands = (await srv.list_commands())["commands"]
+    assert "line2p" in commands and "line" not in commands
+    assert (await srv.run_command("li", ["0,0", "1,1", "escape"]))["unknown_commands"] == []
     fake.allow_commands = False
     off = await srv.run_command("line")
     assert off["error"] == "commands_disabled" and "Preferences" in off["hint"]
-    assert "line" in (await srv.list_commands())["commands"]
 
 
 async def test_formats_and_routes(fake):
     out = await srv.list_formats()
     assert out["save"][1]["labels"]["2018"] == "AutoCAD 2018-2026 (AC1032)"
+    dxf, dwg = out["save"]
+    assert dxf["extension"] == ".dxf" and dwg["extension"] == ".dwg"
+    assert set(dxf["labels"]) == set(dxf["versions"]) and dxf["labels"]["R12"] == "DXF R12 (AC1009)"
+    assert dwg["aliases"]["2026"] == dwg["aliases"]["2019"] == dwg["aliases"]["AC1032"] == "2018"
+    assert dwg["aliases"]["R2000"] == "2000" and dxf["aliases"]["AC1009"] == "R12"

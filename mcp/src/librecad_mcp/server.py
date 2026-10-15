@@ -74,7 +74,8 @@ _HINTS = {
     "unsaved_changes": ("The drawing has unsaved changes: save_document (or save_document_as) first, or ask "
                         "the user and close with discard_changes=True."),
     "file_exists": "A file exists at that path: choose another path, or ask the user and pass overwrite=True.",
-    "file_open_in_other_window": "That file is open in another LibreCAD window: close it there or choose another path.",
+    "file_open_in_other_window": ("That file is open in LibreCAD (another drawing, or this drawing's own file): "
+                                  "choose another path; to write the drawing's own file use save_document."),
     "document_unnamed": "This drawing was never saved: use save_document_as with a path.",
     "cannot_save_in_place": "LibreCAD cannot write this file's format back: use save_document_as with format dxf or dwg.",
     "partial_import": ("Only part of the file could be read: tell the user, and pass accept_partial=True "
@@ -90,8 +91,9 @@ _HINTS = {
                          "paths): use a path it allows; only the user can change that."),
     "commands_disabled": ("The user turned off 'Allow running command-line commands' in LibreCAD's "
                           "Preferences > Remote API (MCP): use the other tools instead."),
-    "invalid_entity": ("Nothing was created: the batch is all-or-nothing. Fix the fields named in errors "
-                       "and send the whole batch again."),
+    "invalid_entity": ("Nothing was changed: the request is all-or-nothing. Fix the fields named in errors "
+                       "(allowed lists the accepted values where LibreCAD has a list) and send the whole "
+                       "request again."),
     "unsupported_format": "Use a format from list_formats.",
     "extension_mismatch": "The file extension must match the format (.dxf, .dwg, .pdf, .png, .svg).",
     "invalid_hatch_boundary": "Hatch boundaries must be closed loops that do not cross themselves.",
@@ -254,11 +256,14 @@ async def _find_layer(c: LibreCadClient, document_id: int | None, name: str) -> 
 
 
 def _layer_needs_confirmation(name: str, entities: str, layer: dict | None) -> bool:
-    """False when LibreCAD will refuse on its own (no such layer, layer 0, non-empty with 'refuse')."""
+    """False when LibreCAD will refuse on its own (no such layer, layer 0, non-empty with 'refuse',
+    or a locked layer that still has entities: layer_locked)."""
     if layer is None or name == "0":
         return False
     count = layer.get("entity_count")
-    return not (entities == "refuse" and isinstance(count, int) and count > 0)
+    if isinstance(count, int) and count > 0 and (entities == "refuse" or layer.get("locked") is True):
+        return False
+    return True
 
 
 async def _ask_delete_layer(name: str, ctx: Context, entities: str = "refuse", move_to: str = "0",
@@ -314,7 +319,9 @@ async def list_formats() -> dict:
     Read-only.
 
     Use it before save_document_as or export_document to pick a valid version, or to tell the
-    user which files can be opened. Versions this build cannot write are not listed.
+    user which files can be opened. Versions this build cannot write are not listed. Each save
+    format has its versions, the default, a label per version, the extension and aliases
+    (AutoCAD codes such as "AC1032", "R2000" spellings, and 2019..2026 for 2018).
 
     Needs 'documents'."""
     return await _call("documents", lambda c: c.formats())
@@ -390,8 +397,8 @@ async def save_document(
     document_id: Annotated[int | None, _DOC] = None,
 ) -> dict:
     """Save a drawing to its own file in its own format, as File > Save does, without any
-    dialog. Returns {"document", "path", "format", "left_out": [...]}, where left_out lists
-    content the file format could not keep.
+    dialog. Returns {"document", "path", "format", "version", "label", "left_out": [...]}, where
+    left_out lists content the file format could not keep.
 
     For a drawing that was never saved, or to change the name, format or DXF/DWG version, use
     save_document_as. To write a copy without renaming the drawing, use export_document.
@@ -419,7 +426,7 @@ async def save_document_as(
 ) -> dict:
     """Save a drawing under a new path, format (DXF or DWG) and version, as File > Save As does,
     without any dialog; the window then refers to the new file. Returns {"document", "path",
-    "format", "version", "left_out"}.
+    "format", "version", "label", "left_out"}.
 
     Use export_document instead to write a copy (or PDF/PNG/SVG) while the drawing keeps its
     current file. Replacing an existing file asks the user (MCP prompt, else user_confirmed).
@@ -460,15 +467,18 @@ async def export_document(
     ctx: Context | None = None,
 ) -> dict:
     """Write a copy of a drawing as DXF or DWG (any version), PDF, PNG or SVG, without renaming
-    the drawing or touching its file. Returns {"path", "format", "version", "bytes", "left_out"}.
+    the drawing or touching its file. Returns {"path", "format", "bytes", "left_out"}, plus
+    "version" and "label" for DXF/DWG.
 
     Use it to convert files or hand a picture or PDF to the user; render_view is for you to look
-    at the drawing. save_document_as changes which file the window refers to; this does not.
+    at the drawing. save_document_as changes which file the window refers to; this does not, and
+    the drawing's own file is refused (file_open_in_other_window): use save_document for that.
     Replacing an existing file asks the user (MCP prompt, else user_confirmed).
 
-    Errors: blocked_by_local_policy, bad_path, path_not_allowed, file_exists, extension_mismatch,
-    bad_param, dwg_unsupported, export_failed, confirmation_required, not_confirmed. Needs
-    'export' ('export_pdf' for PDF, 'export_dwg' for DWG)."""
+    Errors: blocked_by_local_policy, bad_path, path_not_allowed, file_exists,
+    file_open_in_other_window, extension_mismatch, bad_param, dwg_unsupported, export_failed,
+    confirmation_required, not_confirmed. Needs 'export' ('export_pdf' for PDF, 'export_dwg'
+    for DWG)."""
     try:
         norm = check_path(path, "export", format)
     except ApiError as e:
@@ -750,10 +760,11 @@ async def delete_layer(
 
     By default only an empty layer is deleted (layer_not_empty otherwise, without asking).
     entities="move" moves its entities to move_to first (that move is undoable); "delete"
-    deletes them with the layer.
+    deletes them with the layer. A locked layer that still has entities, or a locked move_to
+    layer, is refused (layer_locked): unlock it first.
 
-    Errors: unknown_layer, layer_not_empty, cannot_delete_layer_0, confirmation_required,
-    not_confirmed. Needs 'layers'."""
+    Errors: unknown_layer, layer_not_empty, layer_locked, cannot_delete_layer_0,
+    confirmation_required, not_confirmed. Needs 'layers'."""
     async def run(c: LibreCadClient):
         if not was_asked(answer):
             layer = await _find_layer(c, document_id, name)
@@ -873,11 +884,13 @@ async def add_entities(
     {"created": [...], "ids": [...], "undoable": true, "warnings"}.
 
     Put everything for one drawing step into one call: if any spec is invalid nothing is
-    created and errors names each bad field. Coordinates are drawing units, angles degrees.
-    Check the result with render_view; fix mistakes with undo or update_entity.
+    created, errors maps each bad field ("entities[2].radius") to the reason, and allowed maps
+    a field to its accepted values when LibreCAD has a list. Coordinates are drawing units,
+    angles degrees. Text with halign "aligned" or "fit" needs second_point. Check the result
+    with render_view; fix mistakes with undo or update_entity.
 
-    Errors: invalid_entity (with errors), unknown_layer, layer_locked, too_many, no_document.
-    Needs 'entities'."""
+    Errors: invalid_entity (with errors, allowed), unknown_layer, layer_locked, too_many,
+    no_document. Needs 'entities'."""
     body = {"entities": [spec_to_json(s) for s in entities], "layer": layer, "select": select}
     return await _call("entities", lambda c: c.create_entities(document_id, body))
 
@@ -900,8 +913,8 @@ async def update_entity(
     Only the given fields change. To move, rotate, scale or mirror use transform_entities; to
     change many entities' layer or color, call this once per entity or redraw them.
 
-    Errors: unknown_entity, unknown_field (a field of another type), bad_param, entity_locked,
-    invalid_entity. Needs 'entities'."""
+    Errors: unknown_entity, ambiguous_id, unknown_field (a field of another type, with allowed),
+    bad_param, entity_locked, layer_locked, invalid_entity. Needs 'entities'."""
     body: dict[str, Any] = dict(geometry or {})
     for key, value in (("layer", layer), ("color", color), ("linetype", linetype),
                        ("lineweight", lineweight_mm)):
@@ -951,9 +964,11 @@ async def transform_entities(
     ids; copies get new ids. One undo step.
 
     Use update_entity to set exact coordinates of one entity instead. Nothing happens if any
-    entity is locked.
+    entity is locked, or if LibreCAD cannot apply the transform to one of them (a block
+    reference it cannot edit: invalid_entity, with errors keyed by entity id).
 
-    Errors: unknown_entity, entity_locked, bad_param. Needs 'transform'."""
+    Errors: unknown_entity, entity_locked, invalid_entity, too_many, bad_param. Needs
+    'transform'."""
     needed = {"move": {"offset": offset}, "rotate": {"center": center, "angle_deg": angle_deg},
               "scale": {"base": base, "factor": factor},
               "mirror": {"axis_start": axis_start, "axis_end": axis_end}}[operation]
@@ -1103,8 +1118,9 @@ async def run_command(
     "unknown_commands"}.
 
     Prefer the dedicated tools (add_entities, transform_entities, ...): they are atomic and
-    report ids. Use this for LibreCAD features they lack; list_commands has the names. End
-    drawing commands with "escape". The drawing is activated first.
+    report ids. Use this for LibreCAD features they lack; list_commands has the main names,
+    and the usual aliases ("line", "li", "c", ...) work too. End drawing commands with
+    "escape". The drawing is activated first.
 
     Errors: commands_disabled (the user turned it off), bad_param (empty input). Needs 'command'."""
     if not command.strip():
@@ -1120,10 +1136,12 @@ async def run_command(
 
 @mcp.tool()
 async def list_commands() -> dict:
-    """Command names run_command accepts (they may be in the user's language). Returns
-    {"commands": [...]}. Read-only.
+    """LibreCAD's main command names, which run_command accepts (they may be in the user's
+    language). Returns {"commands": [...]}. Read-only.
 
-    Use it before run_command when unsure of a name.
+    Use it before run_command when unsure of a name. Only main names are listed (for example
+    "line2p" for a two-point line); the short aliases such as "line", "li" or "l" also work in
+    run_command but are not listed.
 
     Needs 'command'."""
     return await _call("command", lambda c: c.commands())

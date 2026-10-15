@@ -108,6 +108,20 @@ async def test_unknown_layer_and_layer_0_ask_nothing(fake, doc):
     assert asker.questions == []
 
 
+async def test_a_locked_layer_with_entities_is_refused_without_asking(fake, doc):
+    await _layer_with_entities(fake)
+    await srv.update_layer("walls", locked=True)
+    asker = Asker()
+    out = await call("delete_layer", {"name": "walls", "entities": "delete"}, asker=asker)
+    assert out["error"] == "layer_locked" and out["layer"] == "walls" and "update_layer" in out["hint"]
+    assert asker.questions == [] and "walls" in doc.layers and len(doc.entities) == 2
+    # a locked target of the move is refused by LibreCAD too (after the usual question)
+    await srv.update_layer("walls", locked=False)
+    await srv.create_layer("archive", locked=True)
+    out = await srv.delete_layer("walls", entities="move", move_to="archive", user_confirmed=True)
+    assert out["error"] == "layer_locked" and out["layer"] == "archive" and "walls" in doc.layers
+
+
 # --- overwriting files ------------------------------------------------------------------------------------
 
 async def test_overwrite_of_an_existing_file_needs_confirmation(fake, doc, tmp_path):
