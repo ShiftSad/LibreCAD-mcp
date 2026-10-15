@@ -30,6 +30,9 @@
 #include "lc_undoabledocumentmodificationaction.h"
 #include "rs_actioninterface.h"
 
+class RS_Entity;
+class RS_EntityContainer;
+
 /**
  * This action class can handle user events to remove blocks.
  *
@@ -39,6 +42,9 @@ class RS_ActionBlocksRemove : public LC_UndoableDocumentModificationAction {
     Q_OBJECT public:
     explicit RS_ActionBlocksRemove(LC_ActionContext* actionContext);
     void init(int status) override;
+    /** The INSERTs of the block named @p blockName that @p container holds,
+     *  deleted ones left out. */
+    static QList<RS_Entity*> insertsOf(const RS_EntityContainer& container, const QString& blockName);
 
 protected:
     bool doTriggerModifications(LC_DocumentModificationBatch& ctx) override;

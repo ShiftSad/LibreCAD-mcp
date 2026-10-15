@@ -2640,6 +2640,7 @@ if (BUILD_TESTS)
         librecad/src/actions/drawing/modify/tests/lc_action_modify_round_tests.cpp
         librecad/src/actions/drawing/modify/tests/lc_action_modify_trim_tests.cpp
         librecad/src/actions/drawing/modify/tests/lc_action_modify_move_tests.cpp
+        librecad/src/actions/dock_widgets/block/tests/rs_actionblocksremove_tests.cpp
         librecad/src/actions/drawing/draw/curve/tests/lc_actiondrawdualtests.cpp
         librecad/src/actions/drawing/modify/tests/lc_action_modify_offset_tests.cpp
         librecad/src/actions/drawing/modify/tests/lc_offsetmatrixtests.cpp
@@ -3350,6 +3351,10 @@ if (BUILD_TESTS)
     add_librecad_filter_micro_test(
         librecad_dxf_paper_space_tests
         librecad/src/lib/filters/tests/lc_dxf_paper_space_tests.cpp)
+
+    add_librecad_filter_micro_test(
+        librecad_blocks_remove_tests
+        librecad/src/actions/dock_widgets/block/tests/rs_actionblocksremove_tests.cpp)
 
     add_librecad_filter_micro_test(
         librecad_entity_pen_inheritance_tests

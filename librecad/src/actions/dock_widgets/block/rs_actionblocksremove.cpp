@@ -34,6 +34,19 @@
 
 class RS_BlockList;
 
+QList<RS_Entity*> RS_ActionBlocksRemove::insertsOf(const RS_EntityContainer& container, const QString& blockName) {
+    // The INSERTs a container holds itself; a block holds its own, and an
+    // INSERT, a text or a dimension holds only what it is drawn with.
+    QList<RS_Entity*> inserts;
+    for (const auto e : container) {
+        if (e != nullptr && e->is(RS2::EntityInsert) && !e->isDeleted()
+            && static_cast<RS_Insert*>(e)->getName() == blockName) {
+            inserts.append(e);
+        }
+    }
+    return inserts;
+}
+
 RS_ActionBlocksRemove::RS_ActionBlocksRemove(LC_ActionContext *actionContext)
     :LC_UndoableDocumentModificationAction("Remove Block", actionContext, RS2::ActionBlocksRemove) {}
 
@@ -66,22 +79,16 @@ bool RS_ActionBlocksRemove::doTriggerModifications(LC_DocumentModificationBatch&
         if (nullptr == block) {
             continue;
         }
+        // Remove every INSERT of the block. ctx -= only lists an entity for
+        // removal, which happens once this returns: one pass per container
+        // finds each of them, where repeating the search until none was left
+        // never ended.
         for (const auto cont: containerList) {
-        // remove all inserts from the graphic:
-        bool done = false;
-        do {
-            done = true;
-            for (const auto e : *cont) {
-                if (e->is(RS2::EntityInsert)) {
-                    auto* insert = static_cast<RS_Insert*>(e);
-                    if (insert->getName() == block->getName() && !insert->isDeleted()) {
-                        ctx -= insert;
-                        done = false;
-                        break;
-                    }
+            for (const auto insert : insertsOf(*cont, block->getName())) {
+                if (!ctx.entitiesToDelete.contains(insert)) {
+                    ctx -= insert;
                 }
             }
-            } while (!done);
         }
 
         // clear selection and active state
