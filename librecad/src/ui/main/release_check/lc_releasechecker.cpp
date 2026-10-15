@@ -24,6 +24,7 @@
 #include "lc_releasechecker.h"
 
 #include <QJsonArray>
+#include <QRegularExpression>
 #include <qjsondocument.h>
 
 #include "rs_debug.h"
@@ -50,6 +51,24 @@ void warnUpdateCheckFailedOnce(const QString &detail) {
     RS_Debug::Log(RS_Debug::D_WARNING)
         << "Checking for updates failed: " << detail;
 }
+
+// librecad-mcp: release tags of the LibreCAD-mcp fork are "v<LibreCAD version>-mcp.<N>",
+// for example v2.2.2.6-mcp.1. N is the fork's build number (LC_MCP_RELEASE): it is global
+// and only goes up, also when the LibreCAD version underneath changes. parseTagInfo() takes
+// the "-mcp.N" part off a tag, parses the rest as before and keeps "mcp.N" in the label,
+// where mcpReleaseOf() finds it again. A tag without the suffix has N = 0.
+const QRegularExpression& mcpTagPattern() {
+    static const QRegularExpression pattern(QStringLiteral(R"(^(.*)-mcp\.?(\d+)(?:[-_+].*)?$)"),
+                                            QRegularExpression::CaseInsensitiveOption);
+    return pattern;
+}
+
+int mcpReleaseOf(const QString &label) {
+    static const QRegularExpression pattern(QStringLiteral(R"((?:^|[-_])mcp\.?(\d+)$)"),
+                                            QRegularExpression::CaseInsensitiveOption);
+    const QRegularExpressionMatch match = pattern.match(label);
+    return match.hasMatch() ? match.captured(1).toInt() : 0;
+}
 } // namespace
 
 LC_TagInfo::LC_TagInfo(int majorVer, int minorVer, int revisionNum, int bugfixVer, const QString &labelVer, const QString &tagNameVer):m_major(majorVer), m_minor(minorVer), m_revision(
@@ -65,10 +84,19 @@ QString LC_TagInfo::getTagName() const {
 }
 
 bool LC_TagInfo::isSameVersion(const LC_TagInfo& other) const {
-    return m_major == other.m_major && m_minor == other.m_minor && m_revision == other.m_revision && m_bugfix == other.m_bugfix;
+    return m_major == other.m_major && m_minor == other.m_minor && m_revision == other.m_revision && m_bugfix == other.m_bugfix
+        && mcpReleaseOf(m_label) == mcpReleaseOf(other.m_label); // librecad-mcp: and the same -mcp.N
 }
 
 bool LC_TagInfo::isBefore(const LC_TagInfo& other) const {
+    // librecad-mcp: the fork's build number orders first, so a LibreCAD-mcp build is offered
+    // every later -mcp.N release and never a tag without the suffix. Equal numbers (and tags
+    // without the suffix, N = 0) compare by version as before.
+    const int mcpRelease = mcpReleaseOf(m_label);
+    const int otherMcpRelease = mcpReleaseOf(other.m_label);
+    if (mcpRelease != otherMcpRelease) {
+        return mcpRelease < otherMcpRelease;
+    }
     if (m_major < other.m_major) {
         return true;
     }
@@ -97,7 +125,15 @@ LC_ReleaseChecker::LC_ReleaseChecker(const QString& ownTagName, const bool ownPr
 
 LC_ReleaseInfo LC_ReleaseChecker::getOwnReleaseInfo(const QString& tagName, const bool preRelease) const {
     constexpr bool draft = false;
-    const LC_TagInfo ownTagInfo = parseTagInfo(tagName);
+    QString ownTagName = tagName;
+#ifdef LC_MCP_RELEASE
+    // librecad-mcp: LC_VERSION never carries the fork's build number, so add it: version
+    // 2.2.2.6-alpha with LC_MCP_RELEASE 1 compares as 2.2.2.6-alpha-mcp.1.
+    if (!mcpTagPattern().match(ownTagName).hasMatch()) {
+        ownTagName += QStringLiteral("-mcp.%1").arg(LC_MCP_RELEASE);
+    }
+#endif
+    const LC_TagInfo ownTagInfo = parseTagInfo(ownTagName);
     auto result = LC_ReleaseInfo("", draft, preRelease, "", "");
     result.setTagInfo(ownTagInfo);
     return result;
@@ -108,7 +144,9 @@ LC_ReleaseInfo LC_ReleaseChecker::getOwnReleaseInfo(const QString& tagName, cons
 void LC_ReleaseChecker::checkForNewVersion(const bool forceCheck) {
 #ifndef TEST_JSON_PARSING
     m_emitSignalIfNoNewVersion = forceCheck;
-    const QUrl gitHubReleasesUrl("https://api.github.com/repos/LibreCAD/LibreCAD/releases");
+    // librecad-mcp: a LibreCAD-mcp build looks for LibreCAD-mcp releases. Upstream asks
+    // https://api.github.com/repos/LibreCAD/LibreCAD/releases here.
+    const QUrl gitHubReleasesUrl("https://api.github.com/repos/ShiftSad/LibreCAD-mcp/releases");
     const QNetworkRequest request(gitHubReleasesUrl);
     m_webCtrl.get(request);
 #else
@@ -132,7 +170,18 @@ void LC_ReleaseChecker::infoReceived(QNetworkReply* reply) {
 }
 
 LC_TagInfo LC_ReleaseChecker::parseTagInfo(const QString& tagName) const {
-    const QStringList& split = tagName.split(".");
+    // librecad-mcp: parse "v2.2.2.6-mcp.1" as "2.2.2.6" plus build number 1 (see mcpTagPattern)
+    QString versionPart = tagName;
+    int mcpRelease = 0;
+    const QRegularExpressionMatch mcpMatch = mcpTagPattern().match(tagName);
+    if (mcpMatch.hasMatch()) {
+        versionPart = mcpMatch.captured(1);
+        mcpRelease = mcpMatch.captured(2).toInt();
+    }
+    if (versionPart.startsWith(QLatin1Char('v'), Qt::CaseInsensitive)) {
+        versionPart.remove(0, 1);
+    }
+    const QStringList& split = versionPart.split(".");
     const qsizetype partsSize = split.size();
     int major = 0;
     int minor = 0;
@@ -179,6 +228,10 @@ LC_TagInfo LC_ReleaseChecker::parseTagInfo(const QString& tagName) const {
                 label = other[1];
             }
         }
+    }
+    if (mcpRelease > 0) { // librecad-mcp: keep the build number in the label, for mcpReleaseOf()
+        label = label.isEmpty() ? QStringLiteral("mcp.%1").arg(mcpRelease)
+                                : QStringLiteral("%1-mcp.%2").arg(label).arg(mcpRelease);
     }
     auto result = LC_TagInfo(major, minor, revision, bugfix, label, tagName);
     return result;

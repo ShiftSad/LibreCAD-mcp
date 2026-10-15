@@ -142,16 +142,21 @@ void LC_MenuFactoryMain::createHelpMenu(QMenuBar* menuBar, QList<QMenu*>& topMen
     menuHelp->QWidget::addAction(urlActionTR(tr("&Forum"), "https://forum.librecad.org/"));
     menuHelp->QWidget::addAction(urlActionTR(tr("Zulip &Chat"), "https://librecad.zulipchat.com/"));
     menuHelp->addSeparator();
-    menuHelp->QWidget::addAction(urlActionTR(tr("&Submit Error"), "https://github.com/LibreCAD/LibreCAD/issues/new"));
-    menuHelp->QWidget::addAction(urlActionTR(tr("&Request Feature"), "https://github.com/LibreCAD/LibreCAD/issues"));
-    menuHelp->QWidget::addAction(urlActionTR(tr("&Releases Page"), "https://github.com/LibreCAD/LibreCAD/releases"));
+    // librecad-mcp: errors, requests and releases of this build go to the LibreCAD-mcp fork; the
+    // forum and the chat above stay upstream's. Upstream links github.com/LibreCAD/LibreCAD
+    // /issues/new, /issues and /releases here.
+    menuHelp->QWidget::addAction(urlActionTR(tr("&Submit Error"), "https://github.com/ShiftSad/LibreCAD-mcp/issues/new"));
+    menuHelp->QWidget::addAction(urlActionTR(tr("&Request Feature"), "https://github.com/ShiftSad/LibreCAD-mcp/issues"));
+    menuHelp->QWidget::addAction(urlActionTR(tr("&Releases Page"), "https://github.com/ShiftSad/LibreCAD-mcp/releases"));
     menuHelp->addSeparator();
 
+#ifndef LC_MCP_RELEASE // librecad-mcp: the fork publishes no "continuous" snapshot; upstream's is not an MCP build
     if (XSTR(LC_PRERELEASE)) {
         // fixme - this is makes sense only for pre-release versions. Of course, the generation of tag included into URL should be more intelligent..
         menuHelp->QWidget::addAction(urlActionTR(tr("&Dev Snapshot Release"), " https://github.com/LibreCAD/LibreCAD/releases/tag/continuous"));
         menuHelp->addSeparator();
     }
+#endif
 
     menuHelp->QWidget::addAction(help_about);
     menuHelp->QWidget::addAction(license);
