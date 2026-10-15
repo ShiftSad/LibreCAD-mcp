@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+node_modules/
+# release artifacts made by scripts/cut-release.sh
+*.mcpb
+*.mcpb.sha256
