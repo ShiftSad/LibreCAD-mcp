@@ -523,6 +523,13 @@ void RS_Spline::updateKnotWrapping() {
 
 /** Borders */
 void RS_Spline::calculateBorders() {
+  // librecad-mcp: bound the curve as drawn (its line approximation), as update() leaves the borders,
+  // so that they do not depend on which of the two ran last (an undo cycle recalculates them; the
+  // Remote API reported another bbox after an undo). The control points only until it is drawn.
+  if (!isEmpty()) {
+    RS_EntityContainer::forcedCalculateBorders();
+    return;
+  }
   resetBorders();
   const size_t s = getUnwrappedSize();
   if (s == 0) {

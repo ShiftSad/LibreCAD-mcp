@@ -345,16 +345,17 @@ struct TextParams {
 
 TextParams readText(const LC_JsonReader& r, const QString& path, QStringList& warnings) {
     TextParams p;
-    p.position = r.point("position");
-    p.text = requireNonEmptyText(r, path);
-    p.height = positive(r, "height", path);
-    p.angle = radians(r.num("angle_deg", 0.0));
-    p.widthFactor = positive(r, "width_factor", 1.0, path);
     static const QStringList hAligns{QStringLiteral("left"), QStringLiteral("center"), QStringLiteral("right"),
                                      QStringLiteral("aligned"), QStringLiteral("middle"), QStringLiteral("fit")};
     static const QStringList vAligns{QStringLiteral("baseline"), QStringLiteral("bottom"), QStringLiteral("middle"), QStringLiteral("top")};
     p.halign = static_cast<RS_TextData::HAlign>(hAligns.indexOf(r.enumOf("halign", hAligns, QStringLiteral("left"))));
     p.valign = static_cast<RS_TextData::VAlign>(vAligns.indexOf(r.enumOf("valign", vAligns, QStringLiteral("baseline"))));
+    p.position = r.point("position");
+    p.text = requireNonEmptyText(r, path);
+    // aligned text takes its height from position and second_point (checkDerivedText)
+    p.height = p.halign == RS_TextData::HAAligned && !r.has("height") ? 1.0 : positive(r, "height", path);
+    p.angle = radians(r.num("angle_deg", 0.0));
+    p.widthFactor = positive(r, "width_factor", 1.0, path);
     p.style = checkFont(r.str("style", QStringLiteral("standard")), json::joinPath(path, QStringLiteral("style")), warnings);
     const std::optional<RS_Vector> second = r.optPoint("second_point");
     const bool needsSecond = p.halign == RS_TextData::HAAligned || p.halign == RS_TextData::HAFit;
@@ -367,6 +368,66 @@ TextParams readText(const LC_JsonReader& r, const QString& path, QStringList& wa
     }
     p.secondPoint = second.value_or(p.position);
     return p;
+}
+
+/**
+ * Aligned, fit and middle text get some fields from LibreCAD, not from the
+ * body (RS_Text::update()): an aligned text's height and angle, and a fit
+ * text's angle, follow from position and second_point; aligned and fit text
+ * stretch between those two points, so width_factor is not used; and the three
+ * sit on the baseline. A body that gives one of these fields a value the text
+ * does not end with is refused (422 invalid_entity naming the field), never
+ * silently changed; the values GET reports pass, so an echo works. given is
+ * the body (POST: the spec; PATCH: the fields it names), keptWidth the
+ * width_factor the entity had (1 for a new one).
+ */
+void checkDerivedText(const QJsonObject& given, const RS_Text& text, const QString& path, const double keptWidth) {
+    const auto has = [&given](const char* key) {
+        const QJsonValue value = given.value(QLatin1String(key));
+        return !value.isUndefined() && !value.isNull();
+    };
+    const RS_TextData::HAlign halign = text.getHAlign();
+    const bool aligned = halign == RS_TextData::HAAligned;
+    const bool fit = halign == RS_TextData::HAFit;
+    if (!aligned && !fit && halign != RS_TextData::HAMiddle) {
+        return;
+    }
+    const QString kind = aligned ? QStringLiteral("aligned") : fit ? QStringLiteral("fit") : QStringLiteral("middle");
+    const auto field = [&path](const char* key) {
+        return json::joinPath(path, QLatin1String(key));
+    };
+    if (aligned && has("height")) {
+        const double kept = text.getHeight();
+        if (std::abs(given.value(QStringLiteral("height")).toDouble() - kept) > 1e-6 * std::max(1.0, std::abs(kept))) {
+            json::throwInvalidEntity(field("height"),
+                                     QStringLiteral("aligned text takes its height from the distance between position and "
+                                                    "second_point (here %1): leave height out, or move second_point")
+                                         .arg(kept, 0, 'g', 12));
+        }
+    }
+    if ((aligned || fit) && has("angle_deg")) {
+        const double kept = RS_Math::rad2deg(text.getAngle());
+        if (std::abs(std::remainder(given.value(QStringLiteral("angle_deg")).toDouble() - kept, 360.0)) > 1e-6) {
+            json::throwInvalidEntity(field("angle_deg"),
+                                     QStringLiteral("%1 text takes its angle from position to second_point (here %2 degrees): "
+                                                    "leave angle_deg out, or move second_point")
+                                         .arg(kind)
+                                         .arg(kept, 0, 'g', 12));
+        }
+    }
+    if ((aligned || fit) && has("width_factor")) {
+        const double wanted = given.value(QStringLiteral("width_factor")).toDouble();
+        if (std::abs(wanted - keptWidth) > 1e-9 * std::max(1.0, std::abs(keptWidth))) {
+            json::throwInvalidEntity(field("width_factor"),
+                                     QStringLiteral("%1 text is stretched to fill position to second_point, so width_factor "
+                                                    "is not used: leave it out")
+                                         .arg(kind));
+        }
+    }
+    if (has("valign") && given.value(QStringLiteral("valign")).toString() != QLatin1String("baseline")) {
+        json::throwInvalidEntity(field("valign"),
+                                 QStringLiteral("%1 text sits on its baseline: valign must be \"baseline\" (or left out)").arg(kind));
+    }
 }
 
 struct MTextParams {
@@ -646,7 +707,9 @@ std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::createEntity(const QJsonOb
         const TextParams p = readText(r, path, warnings);
         const RS_TextData data(p.position, p.secondPoint, p.height, p.widthFactor, p.valign, p.halign, RS_TextData::None, p.text, p.style,
                                p.angle, RS2::Update);
-        return std::make_unique<RS_Text>(m_document, data);
+        auto text = std::make_unique<RS_Text>(m_document, data);
+        checkDerivedText(spec, *text, path, 1.0);
+        return text;
     }
     if (type == QLatin1String("mtext")) {
         const MTextParams p = readMText(r, path, warnings);
@@ -935,6 +998,7 @@ std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::patch(RS_Entity* original,
         text->setText(p.text);
         text->setSecondPoint(p.secondPoint);
         text->update();
+        checkDerivedText(fields, *text, QString(), static_cast<const RS_Text*>(original)->getWidthRel());
         return clone;
     }
     if (type == QLatin1String("mtext")) {
