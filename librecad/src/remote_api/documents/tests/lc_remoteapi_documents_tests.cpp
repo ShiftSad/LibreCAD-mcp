@@ -417,6 +417,29 @@ TEST_CASE("Remote API path policy refuses unsafe paths", "[remote-api][documents
         CHECK_FALSE(LC_RemoteApiPathPolicy::isNetworkPath(existing));
     }
 
+#ifdef Q_OS_WIN
+    SECTION("device namespace paths are refused even with AllowNetworkPaths") {
+        LC_RemoteApiConfig config;
+        config.allowNetworkPaths = true;
+        const LC_RemoteApiPathPolicy network(config);
+        const QString native = QDir::toNativeSeparators(existing);
+        // "\\?\C:\...\existing.dxf:q.pdf" would write a hidden stream of a local file
+        const QStringList devicePaths{QStringLiteral("\\\\?\\") + native + QStringLiteral(":q.pdf"),
+                                      QStringLiteral("\\\\.\\") + native + QStringLiteral(":q.pdf"),
+                                      QStringLiteral("\\\\?\\") + native, QStringLiteral("//?/") + existing,
+                                      QStringLiteral("\\\\?\\UNC\\server\\share\\a.dxf"), QStringLiteral("\\??\\") + native};
+        for (const QString& path : devicePaths) {
+            CAPTURE(path);
+            CHECK(errorOf([&] { network.check(path, Access::Write, {".pdf", ".dxf"}, true); }) == Error{403, "path_not_allowed"});
+        }
+        // a stream on a share is refused like a local one
+        CHECK(errorOf([&] { network.check("\\\\server\\share\\host.txt:x.pdf", Access::Write, {".pdf"}); })
+              == Error{400, "bad_path"});
+        CHECK(errorOf([&] { network.check("//server/share/host.txt:x.pdf", Access::Write, {".pdf"}); })
+              == Error{400, "bad_path"});
+    }
+#endif
+
     SECTION("allowed roots") {
         LC_RemoteApiConfig config;
         config.allowedRoots = {dir.filePath("inside")};
@@ -502,6 +525,20 @@ TEST_CASE("Remote API path policy refuses unsafe paths", "[remote-api][documents
               == Error{403, "path_not_allowed"});
         // the folder itself is still usable
         CHECK_FALSE(policy.check(dir.filePath("inside/plain.dxf"), Access::Write).isEmpty());
+        // a path over MAX_PATH through the junction is resolved too (Qt's writers reach it)
+        QString deep;
+        for (int i = 0; i < 6; ++i) {
+            deep += QStringLiteral("/") + QString(40, QChar(u'a' + i));
+        }
+        REQUIRE(QDir().mkpath(dir.filePath("outside") + deep));
+        REQUIRE(QDir().mkpath(dir.filePath("inside") + deep));
+        const QString longEscape = dir.filePath("inside/jn") + deep + QStringLiteral("/escaped.png");
+        REQUIRE(longEscape.size() > 300);
+        CHECK(errorOf([&] { policy.check(longEscape, Access::Write, {".png"}); }) == Error{403, "path_not_allowed"});
+        CHECK(errorOf([&] { policy.check(dir.filePath("inside/jn") + deep, Access::Read); }) == Error{403, "path_not_allowed"});
+        const QString longInside = dir.filePath("inside") + deep + QStringLiteral("/kept.png");
+        REQUIRE(longInside.size() > 260);
+        CHECK(policy.check(longInside, Access::Write, {".png"}) == QDir::cleanPath(longInside));
         // an allowed root that is itself a junction is resolved the same way
         LC_RemoteApiConfig viaJunction;
         viaJunction.allowedRoots = {dir.filePath("inside/jn")};

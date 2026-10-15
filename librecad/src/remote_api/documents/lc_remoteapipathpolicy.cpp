@@ -52,68 +52,92 @@ QString withSlashes(const QString& path) {
     throw LC_ApiError(status, QString::fromLatin1(token), detail, extra);
 }
 
+#ifdef Q_OS_WIN
+/**
+ * The name CreateFileW opens at any length: "\\?\C:\..." or "\\?\UNC\host\share\...".
+ * Without the prefix a path longer than MAX_PATH (260) cannot be opened here,
+ * while Qt's file classes add it themselves and reach the file.
+ */
+std::wstring longNativeName(const QString& absolutePath) {
+    QString p = QDir::cleanPath(withSlashes(absolutePath));
+    if (p.startsWith(QLatin1String("//?/")) || p.startsWith(QLatin1String("//./"))) {
+        // already in the device namespace
+    }
+    else if (p.startsWith(QLatin1String("//"))) {
+        p = QStringLiteral("//?/UNC/") + p.mid(2);
+    }
+    else {
+        p = QStringLiteral("//?/") + p;
+    }
+    return QDir::toNativeSeparators(p).toStdWString();
+}
+#endif
+
 /**
  * The final path of an existing file or folder, with every link resolved:
  * symbolic links and, on Windows, every other reparse point too (directory
  * junctions and volume mount points, which QFileInfo::canonicalFilePath()
- * leaves as they are). Empty when it cannot be resolved.
+ * leaves as they are), at any length. Empty when it cannot be resolved: the
+ * caller then refuses the path, since the text alone could lead anywhere.
  */
 QString resolvedExisting(const QString& existingPath) {
 #ifdef Q_OS_WIN
     // FILE_FLAG_BACKUP_SEMANTICS opens folders as well; no access right is
     // needed to ask for the final name.
-    const std::wstring native = QDir::toNativeSeparators(existingPath).toStdWString();
+    const std::wstring native = longNativeName(QFileInfo(existingPath).absoluteFilePath());
     const HANDLE handle = CreateFileW(native.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (handle != INVALID_HANDLE_VALUE) {
-        std::wstring buffer(MAX_PATH, L'\0');
-        DWORD length = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()),
-                                                 FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-        if (length >= buffer.size()) {
-            buffer.resize(length + 1);
-            length = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()),
-                                               FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-        }
-        CloseHandle(handle);
-        if (length > 0 && length < buffer.size()) {
-            QString result = withSlashes(QString::fromWCharArray(buffer.data(), static_cast<qsizetype>(length)));
-            // "//?/C:/x" -> "C:/x"; "//?/UNC/host/share" -> "//host/share"
-            if (result.startsWith(QLatin1String("//?/UNC/"), Qt::CaseInsensitive)) {
-                result = QLatin1String("//") + result.mid(8);
-            }
-            else if (result.startsWith(QLatin1String("//?/"))) {
-                result = result.mid(4);
-            }
-            return QDir::cleanPath(result);
-        }
+    if (handle == INVALID_HANDLE_VALUE) {
+        return {};
     }
-#endif
+    std::wstring buffer(MAX_PATH, L'\0');
+    DWORD length = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                             FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (length >= buffer.size()) {
+        buffer.resize(length + 1);
+        length = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                           FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    }
+    CloseHandle(handle);
+    if (length == 0 || length >= buffer.size()) {
+        return {};
+    }
+    QString result = withSlashes(QString::fromWCharArray(buffer.data(), static_cast<qsizetype>(length)));
+    // "//?/C:/x" -> "C:/x"; "//?/UNC/host/share" -> "//host/share"
+    if (result.startsWith(QLatin1String("//?/UNC/"), Qt::CaseInsensitive)) {
+        result = QLatin1String("//") + result.mid(8);
+    }
+    else if (result.startsWith(QLatin1String("//?/"))) {
+        result = result.mid(4);
+    }
+    return QDir::cleanPath(result);
+#else
     return QFileInfo(existingPath).canonicalFilePath();
+#endif
 }
 
 /**
  * The canonical form of path: of the file when it exists, else of its nearest
  * existing ancestor with the rest appended. Symbolic links, directory
  * junctions (Windows) and ".." are resolved, so a path cannot leave an allowed
- * folder through them.
+ * folder through them. Empty when what exists of it cannot be resolved.
  */
 QString canonicalForm(const QString& normalizedPath) {
     const QFileInfo info(normalizedPath);
     if (info.exists()) {
-        const QString resolved = resolvedExisting(normalizedPath);
-        return resolved.isEmpty() ? normalizedPath : resolved;
+        return resolvedExisting(normalizedPath);
     }
     QStringList rest{info.fileName()};
     QDir dir = info.absoluteDir();
     while (!dir.exists()) {
         rest.prepend(dir.dirName());
         if (!dir.cdUp()) {
-            return normalizedPath;
+            return normalizedPath; // nothing of it exists: no link to follow
         }
     }
     QString base = resolvedExisting(dir.absolutePath());
     if (base.isEmpty()) {
-        return normalizedPath;
+        return {};
     }
     if (!base.endsWith(QLatin1Char('/'))) {
         base += QLatin1Char('/');
@@ -185,6 +209,9 @@ bool LC_RemoteApiPathPolicy::isUnderAllowedRoot(const QString& normalizedPath) c
         return true;   // no restriction
     }
     const QString canonical = canonicalForm(normalizedPath);
+    if (canonical.isEmpty()) {
+        return false; // fail closed
+    }
     for (const QString& root : std::as_const(roots)) {
         if (isNetworkPath(root) && !m_config.allowNetworkPaths) {
             continue;
@@ -222,31 +249,41 @@ QString LC_RemoteApiPathPolicy::check(const QString& path, const Access access, 
     }
 
     const bool network = isNetworkPath(raw);
+#ifdef Q_OS_WIN
+    const QString p = withSlashes(raw);
+    // "\\?\C:\x", "\\.\C:\x" and "\??\C:\x" name the device namespace, not a
+    // share: through them a local file would skip the rules below (Allow
+    // network paths admits \\server\share only)
+    if (p.startsWith(QLatin1String("//?/")) || p.startsWith(QLatin1String("//./")) || p.startsWith(QLatin1String("/??/"))) {
+        fail(403, "path_not_allowed",
+             QStringLiteral("device namespace paths (\\\\?\\, \\\\.\\) are not allowed: write C:/... or \\\\server\\share\\..."), path);
+    }
+#endif
     if (network && !m_config.allowNetworkPaths) {
         fail(403, "path_not_allowed",
-             QStringLiteral("network and device paths are not allowed (Preferences > Remote API)"), path);
+             QStringLiteral("network paths are not allowed (Preferences > Remote API)"), path);
     }
-    if (!network) {
 #ifdef Q_OS_WIN
+    if (!network) {
         // "C:/x" only: "C:x" is relative to the drive's current folder and "/x" to the current drive
-        const QString p = withSlashes(raw);
         const bool driveAbsolute = p.size() >= 3 && p.at(0).isLetter() && p.at(1) == QLatin1Char(':')
             && p.at(2) == QLatin1Char('/');
         if (!driveAbsolute) {
             fail(400, "bad_path", QStringLiteral("the path must be absolute (for example C:/drawings/a.dxf)"), path);
         }
-        // "C:/a/host.txt:hidden.pdf" names an alternate data stream of host.txt:
-        // the extension and overwrite rules would judge another file than the one written
-        if (p.indexOf(QLatin1Char(':'), 2) >= 0) {
-            fail(400, "bad_path", QStringLiteral("':' is only allowed after the drive letter (alternate data streams are not files)"),
-                 path);
-        }
-#else
-        if (!QDir::isAbsolutePath(raw)) {
-            fail(400, "bad_path", QStringLiteral("the path must be absolute"), path);
-        }
-#endif
     }
+    // "C:/a/host.txt:hidden.pdf" (or "//host/share/host.txt:hidden.pdf") names an
+    // alternate data stream of host.txt: the extension and overwrite rules
+    // would judge another file than the one written
+    if (p.indexOf(QLatin1Char(':'), 2) >= 0) {
+        fail(400, "bad_path",
+             QStringLiteral("':' is only allowed after the drive letter (alternate data streams are not files)"), path);
+    }
+#else
+    if (!network && !QDir::isAbsolutePath(raw)) {
+        fail(400, "bad_path", QStringLiteral("the path must be absolute"), path);
+    }
+#endif
 
     const QString normalized = QDir::cleanPath(QFileInfo(raw).absoluteFilePath());
     // the roots first: nothing is said about files outside them
