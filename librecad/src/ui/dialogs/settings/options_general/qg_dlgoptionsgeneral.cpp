@@ -32,6 +32,7 @@
 
 #include "dxf_format.h"
 #include "lc_defaults.h"
+#include "lc_remoteapioptionswidget.h" // librecad-mcp: Remote API tab
 #include "lc_settingsexporter.h"
 #include "main.h"
 #include "qc_applicationwindow.h"
@@ -55,6 +56,10 @@ QG_DlgOptionsGeneral::QG_DlgOptionsGeneral(QWidget *parent)
     : LC_Dialog(parent, "OptionsGeneral"){
     setModal(false);
     setupUi(this);
+    // librecad-mcp: the Remote API tab, built in code (the .ui file stays untouched)
+    const auto* appWindow = qobject_cast<QC_ApplicationWindow*>(parent);
+    m_remoteApiTab = new LC_RemoteApiOptionsWidget(tabWidget, appWindow != nullptr ? appWindow->remoteApi() : nullptr);
+    tabWidget->addTab(m_remoteApiTab, tr("Remote API (MCP)"));
     tabWidget->setCurrentIndex(m_currentTab);
     init();
     connect(variablefile_button, &QToolButton::clicked,
@@ -817,6 +822,7 @@ void QG_DlgOptionsGeneral::updateMainWindowTitle(bool showVersionInTitle) {
     else {
         mainWinTitle = QApplication::applicationName();
     }
+    mainWinTitle += QStringLiteral(" MCP"); // librecad-mcp: build identity, as in main()
     QC_ApplicationWindow::getAppWindow()->setWindowTitle(mainWinTitle);
 }
 
@@ -1167,6 +1173,7 @@ void QG_DlgOptionsGeneral::ok(){
         }
         LC_GROUP_END();
         saveReferencePoints();
+        m_remoteApiTab->save(); // librecad-mcp: applied by QC_ApplicationWindow::slotOptionsGeneral()
     }
     // fixme - sand - files - RESTORE ! change to main windows emit!
     RS_SETTINGS->emitOptionsChanged();

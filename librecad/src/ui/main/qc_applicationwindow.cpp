@@ -85,6 +85,7 @@
 #include "lc_releasechecker.h"
 #include "lc_relzerocoordinateswidget.h"
 #include "lc_remoteapicontroller.h" // librecad-mcp: complete type for m_remoteApi
+#include "lc_remoteapigui.h" // librecad-mcp: autosave gate
 #include "lc_snapmanager.h"
 #include "lc_snapoptionswidgetsholder.h"
 #include "lc_ucslistwidget.h"
@@ -176,6 +177,7 @@ QC_ApplicationWindow::QC_ApplicationWindow() {
  * Destructor.
  */
 QC_ApplicationWindow::~QC_ApplicationWindow() {
+    if (m_remoteApi != nullptr) { m_remoteApi->stop(); } // librecad-mcp: before any member goes
     RS_DEBUG->print("QC_ApplicationWindow::~QC_ApplicationWindow");
 
     // Quitting closes every drawing through doClose(), and the windows' deferred
@@ -1894,6 +1896,7 @@ void QC_ApplicationWindow::slotFileSaveAll() {
  */
 void QC_ApplicationWindow::autoSaveCurrentDrawing() {
     RS_DEBUG->print("QC_ApplicationWindow::autoSaveCurrentDrawing(): begin");
+    if (LC_RemoteApiGui::depth() > 0) { return; } // librecad-mcp: no autosave inside a Remote API task
     if (!LC_GET_ONE_BOOL("Defaults", "AutoBackupDocument", true)) {
         RS_DEBUG->print("QC_ApplicationWindow::autoSaveCurrentDrawing(): AutoBackupDocument disabled");
         startAutoSaveTimer(false);
@@ -1931,6 +1934,11 @@ void QC_ApplicationWindow::showStatusMessage(const QString& msg, [[maybe_unused]
 
 void QC_ApplicationWindow::initCompleted() {
     enableFileActions();
+    // librecad-mcp: start the in-app Remote API when it is enabled in Preferences
+    if (m_remoteApi == nullptr) {
+        m_remoteApi = std::make_unique<LC_RemoteApiController>(this);
+        m_remoteApi->startIfEnabled();
+    }
 }
 
 void QC_ApplicationWindow::slotFileExport() {
@@ -2310,6 +2318,7 @@ void QC_ApplicationWindow::slotOptionsGeneral() {
         // fixme - sand - consider emitting signal on properties change instead of processing changes there
         m_infoCursorSettingsManager->loadFromSettings();
         rebuildMenuIfNecessary();
+        if (m_remoteApi != nullptr) { m_remoteApi->applySettings(); } // librecad-mcp: Remote API tab
     }
     fireCurrentActionIconChanged(nullptr);
 }
@@ -2357,6 +2366,7 @@ bool QC_ApplicationWindow::tryCloseAllBeforeExist() {
     if (mayExit) {
         m_lastFilesOpener->saveSettings();
         storeSettings();
+        if (m_remoteApi != nullptr) { m_remoteApi->stop(); } // librecad-mcp: no API requests while quitting
     }
     return mayExit;
 }

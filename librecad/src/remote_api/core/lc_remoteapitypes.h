@@ -47,6 +47,10 @@ struct LC_ApiRequest {
     QMultiHash<QString, QString> query;        // decoded; repeated keys kept
     QHash<QByteArray, QByteArray> headers;     // lower-case names
     QByteArray body;
+    // The path as received (still percent-encoded), no query. The router splits
+    // it on '/' before decoding each segment, so an encoded "%2F" stays inside
+    // its {param}; when empty (requests built in code) the router splits path.
+    QString rawPath;
 };
 
 /**

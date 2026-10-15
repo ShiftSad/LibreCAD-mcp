@@ -65,6 +65,10 @@ public:
     QJsonObject raw() const;
 
 private:
+    QString fullPath(const char* key) const;   // "entities[2].radius"
+    QJsonValue value(const char* key) const;
+    QJsonValue required(const char* key) const; // 400 missing_param when absent or null
+
     QJsonObject m_object;
     QString m_path;                            // "" for the body itself, "entities[2]" for a nested object
 };
