@@ -20,7 +20,7 @@ passed and 1 otherwise (2 for bad arguments).
 py -3 tools/remote-api/e2e_smoke.py --exe C:/path/to/build/LibreCAD.exe --qt-bin C:/Qt/6.9.3/msvc2022_64/bin
 
 # Windows, installed or portable LibreCAD-mcp
-py -3 tools/remote-api/e2e_smoke.py --exe "C:/Program Files/LibreCAD/LibreCAD.exe"
+py -3 tools/remote-api/e2e_smoke.py --exe "C:/Program Files/LibreCAD-mcp/LibreCAD.exe"
 
 # Linux
 python3 tools/remote-api/e2e_smoke.py --exe ./build/librecad

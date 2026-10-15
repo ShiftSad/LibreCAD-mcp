@@ -55,20 +55,24 @@ command disagree, the command is right: update the table.
 |---|---|---|
 | `CMakeLists.txt` | after `set (SHARED_SOURCES ...)` | `include(.../remote_api/remote_api.cmake)`, then append `LC_REMOTE_API_SOURCES`/`INCLUDES` |
 | `CMakeLists.txt` | after `librecad_lib` and after `librecad` | `target_compile_definitions(... PRIVATE ${LC_REMOTE_API_DEFINES})` (`LC_MCP_RELEASE` and the `LC_REMOTE_API_HAS_*` macros) |
-| `CMakeLists.txt` | inside `if (BUILD_TESTS)` | the `librecad_remote_api_tests` target |
+| `CMakeLists.txt` | inside `if (BUILD_TESTS)`, next to the other `LIBRECAD_REGISTER_*` options | the `librecad_remote_api_tests` target; the option `LIBRECAD_REGISTER_REMOTE_API_TESTS` (off) that registers it with CTest |
 | `librecad/src/src.pro` | next to the other `include()`s | `include($$PWD/remote_api/remote_api.pri)` (qmake is still built by CodeQL) |
 | `.gitignore` | after the core-dump patterns | re-include `librecad/src/remote_api/core/`, which `core` and `core.*` would hide |
 | `librecad/src/ui/main/qc_applicationwindow.h` | class body | forward declaration, `m_remoteApi` next to `m_releaseChecker`, `remoteApi()`, `friend class LC_RemoteApiAppAccess` |
 | `librecad/src/ui/main/qc_applicationwindow.cpp` | includes, `~QC_ApplicationWindow()`, `initCompleted()`, `slotOptionsGeneral()`, `tryCloseAllBeforeExist()`, `autoSaveCurrentDrawing()` | include the controller; stop it first in the destructor; create it and `startIfEnabled()`; `applySettings()` on OK; `stop()` once exit is confirmed; skip autosave while an API task runs |
+| `librecad/src/ui/main/qc_applicationwindow.cpp` | `openFile`, `newDrawingFromTemplate`, `slotEditActiveBlock`, `doCloseAllFiles`, `tryCloseAllBeforeExist` | one `LC_RemoteApiGui::UserBusyScope` line each, so no API task runs inside the `processEvents` (or between the closes) of the user's own action; `newDrawingFromTemplate`'s `processEvents` leaves out user input inside an API task |
 | `librecad/src/ui/dialogs/settings/options_general/qg_dlgoptionsgeneral.{h,cpp}` | constructor, `ok()` | the "Remote API (MCP)" tab and its `save()` |
 | `librecad/src/main/main.cpp` | before `RS_Settings::init`, window title | `LIBRECAD_SETTINGS_DIR` (INI settings in a folder, for tests); `" MCP"` in the title |
 | `librecad/src/ui/main/qc_mdiwindow.{h,cpp}` | `loadDocument` | a defaulted `onImportError` callback, passed on |
-| `librecad/src/ui/main/persistence/lc_documentsstorage.{h,cpp}` | `loadDocument`, `loadGraphic` | the same callback, passed to `RS_FileIO::fileImport` (no message boxes on import errors) |
+| `librecad/src/ui/main/persistence/lc_documentsstorage.{h,cpp}` | includes, `loadDocument`, `loadGraphic` | the same callback, passed to `RS_FileIO::fileImport` (no message boxes on import errors); a `UserBusyScope` around the load, whose `processEvents` leaves out user input inside an API task |
+| `librecad/src/lib/engine/settings/lc_settingsexporter.cpp` | `exportSettings`, `importSettings` | skip the `RemoteAPI` group: the token never goes into an exported file, and an import never enables the API |
 | `librecad/src/lib/generators/image/lc_imageexporter.{h,cpp}` | `ExportOptions`, `prepareViewport` | a world `window` (null means auto) and `renderToImage` into a `QImage` |
 | `librecad/src/ui/main/release_check/lc_releasechecker.cpp` | `checkForNewVersion`, `parseTagInfo`, `isBefore`, `isSameVersion`, `getOwnReleaseInfo` | the fork's releases URL; `-mcp.N` tags parsed and ordered by N first; this build's own N from `LC_MCP_RELEASE` |
 | `librecad/src/ui/dialogs/main/lc_dlgabout.cpp` | constructor | "LibreCAD-mcp build: N" line; "The Code" links to the fork, plus an "Upstream LibreCAD" link |
 | `librecad/src/ui/main/init/lc_menufactory_main.cpp` | `createHelpMenu` | Submit Error, Request Feature and Releases Page go to the fork (forum and chat stay upstream's); "Dev Snapshot Release" is left out of MCP builds |
-| `.github/workflows/build-all.yml` | triggers, every upload step, the Windows jobs, `UpdateAssets` | `v*-mcp.*` tags trigger it; artifacts `LibreCAD-mcp_*`; Windows portable zip and `SHA256SUMS-win-<arch>.txt`; `UpdateAssets` (which only runs in the LibreCAD organisation) follows the new artifact names |
+| `.github/workflows/build-all.yml` | triggers, every upload step, the Windows jobs, `UpdateAssets` | `v*-mcp.*` tags trigger it; artifacts `LibreCAD-mcp_*`; Windows portable zip and `SHA256SUMS-win-<arch>.txt`; `!define LC_MCP` appended to `custom.nsh`; `UpdateAssets` (which only runs in the LibreCAD organisation) follows the new artifact names |
+| `scripts/postprocess-windows/nsis-msvc.nsi` | definitions, registry, shortcuts, file types | with `LC_MCP` defined: installs as "LibreCAD-mcp" (folder, uninstall entry, `Software\LibreCAD-mcp` key, `LibreCAD-mcp.DXF/.DWG` ProgIDs, publisher) beside upstream LibreCAD; upstream's values otherwise |
+| `snapcraft.yaml` | `name`, `apps.librecad.plugs` | the snap is `librecad-mcp` (beside upstream's `librecad`), with `network-bind` for the Remote API |
 | `README.md` | top | the fork banner (the `> [!IMPORTANT]` block; Markdown has no marker) |
 
 **Code copied from upstream** has no marker but must follow upstream changes. After a sync, diff
@@ -153,10 +157,13 @@ Then compare the copied code (table in section 1) with its upstream source.
 ### 2.5 Build and test
 
 ```bash
-# C++: CMake build with tests, then the Remote API tests and upstream's fast tests
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+# C++: CMake build with tests, then the Remote API tests and upstream's fast tests. The Remote API
+# tests are registered with CTest only with LIBRECAD_REGISTER_REMOTE_API_TESTS=ON;
+# librecad_fast_tests has no add_test(), so it runs directly.
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DLIBRECAD_REGISTER_REMOTE_API_TESTS=ON
 cmake --build build --target librecad librecad_remote_api_tests librecad_fast_tests
-QT_QPA_PLATFORM=offscreen ctest --test-dir build -R "librecad_remote_api_tests|librecad_fast_tests" --output-on-failure
+QT_QPA_PLATFORM=offscreen ctest --test-dir build -R librecad_remote_api_tests --output-on-failure
+QT_QPA_PLATFORM=offscreen build/librecad_fast_tests
 
 # qmake still has to build (CodeQL uses it): every new C++ file is in a .pri as well as a .cmake
 qmake6 -r librecad.pro && make -j
@@ -188,17 +195,25 @@ On Windows, run the e2e test with `--qt-bin <Qt>/bin` for a development build (s
   only goes up**, also when the LibreCAD version underneath changes. `/status` reports it as
   `mcp_build`, and the About box shows it.
 - **Release tags** are `v<LC_VERSION without its label>-mcp.<N>`: `LC_VERSION` `2.2.2.6-alpha`
-  with N = 1 gives **`v2.2.2.6-mcp.1`**. One tag per N; a tag is never moved or reused.
+  with N = 1 gives **`v2.2.2.6-mcp.1`**. One tag per N; a tag is never moved or reused. The tag of
+  a build is fixed as `LC_MCP_TAG` next to `LC_MCP_RELEASE` (`remote_api.cmake` builds it from
+  the version and N; `remote_api.pri` spells it out): Preferences > Copy MCP config of a release
+  build runs the server from it. It is never derived from `LC_VERSION` at run time, because qmake
+  builds put `git describe` there.
 - **The in-app update check** (`lc_releasechecker.cpp`) reads the fork's GitHub releases, parses
   `-mcp.N` and orders by N first, so a build offers every release with a higher N, and never a tag
   without the suffix. A release whose tag breaks the pattern is invisible to it.
 - **The Python package** (`mcp/pyproject.toml`, `mcp/server.json`, `mcp/mcpb/manifest.json`) has
-  its own semantic version. `mcp/scripts/cut-release.sh <version> <tag>` bumps all three and pins
-  the tag in the `uvx --from git+...@<tag>` lines, the `.mcpb` launcher and the README.
+  its own semantic version. `mcp/scripts/cut-release.sh <version> <tag>` checks that the tag is
+  this build's (`LC_VERSION`, `LC_MCP_RELEASE` and `LC_MCP_TAG` in both build files), bumps all
+  three, pins the tag in every `uvx --from git+...@<tag>` line (the `.mcpb` launcher, the READMEs,
+  `DESIGN.md`) and in the documentation links of the metadata, and packs the server into the
+  `.mcpb`.
 
 ### 3.2 Making a release
 
-1. In one commit ("Release LibreCAD-mcp N"): bump `LC_MCP_RELEASE` in both files, and run
+1. In one commit ("Release LibreCAD-mcp N"): bump `LC_MCP_RELEASE` in both files (and
+   `LC_MCP_TAG` in `remote_api.pri`), and run
    `mcp/scripts/cut-release.sh <python version> v<version>-mcp.<N>`.
 2. Everything in 2.5 passes.
 3. Only after the repository owner confirms: tag and push the tag.
@@ -213,7 +228,10 @@ On Windows, run the e2e test with `--qt-bin <Qt>/bin` for a development build (s
    `LibreCAD-mcp_win-x64` and `LibreCAD-mcp_win-arm64`; each Windows one holds the installer, the
    portable zip and `SHA256SUMS-win-<arch>.txt`. Artifacts expire after 2 days, so download them
    promptly (`gh run download <run id>`).
-5. Create the GitHub release on the fork with those files and the `.mcpb` from `cut-release.sh`
+5. Run the release gate, `mcp/scripts/check-release.sh v2.2.2.6-mcp.1`: the tag is on origin,
+   everything in the tagged tree is pinned to it, and `uvx` starts the server from it. Every
+   documented `uvx --from git+...@<tag>` line depends on that.
+6. Create the GitHub release on the fork with those files and the `.mcpb` from `cut-release.sh`
    (`gh release create v2.2.2.6-mcp.1 --repo ShiftSad/LibreCAD-mcp ...`). Mark it as a pre-release
    while `LC_VERSION` carries a label such as `alpha`.
 

@@ -872,8 +872,13 @@ def step_layer(r: Runner, api: ApiClient, st: State) -> None:
         if st.doc is None:
             return r.skip("create layer", "no document")
         q = {"doc": st.doc}
+        current = api.get("layers", q).obj.get("current")
         resp = api.post("layers", {"name": "walls", "color": "#ff0000"}, q)
         r.require("POST /layers -> 201", resp.status == 201, resp)
+        # the layer list widget activates every new layer of the active drawing; make_current is false
+        r.check("a new layer does not become current without make_current",
+                resp.obj.get("layer", {}).get("current") is False and api.get("layers", q).obj.get("current") == current,
+                short(resp.obj.get("layer")))
         layer = resp.obj.get("layer") if isinstance(resp.obj.get("layer"), dict) else {}
         r.check("layer name is walls", layer.get("name") == "walls", short(layer))
         r.check("layer color is #ff0000", str(layer.get("color", "")).lower() == "#ff0000", short(layer))
@@ -1172,13 +1177,16 @@ def step_command(r: Runner, api: ApiClient, st: State) -> None:
             return r.skip("command", "no reopened document")
         q = {"doc": st.doc2}
         before = entity_total(api, st.doc2)
-        resp = api.post("command", {"command": "line", "inputs": ["0,0", "10,10", "escape"]}, q,
+        resp = api.post("command", {"command": "line", "inputs": ["0,0", "10,10", "escape", "escape"]}, q,
                         timeout=LONG_TIMEOUT)
-        r.require("POST /command line 0,0 10,10 escape -> 200", resp.status == 200, resp)
+        r.require("POST /command line 0,0 10,10 escape escape -> 200", resp.status == 200, resp)
         r.check("output is a non-empty list", isinstance(resp.obj.get("output"), list) and resp.obj["output"],
                 short(resp.obj.get("output")))
         r.check("no unknown commands", not resp.obj.get("unknown_commands"), short(resp.obj.get("unknown_commands")))
         r.check("one more entity", before is not None and entity_total(api, st.doc2) == before + 1)
+        # one escape ends the segment chain, the second leaves the tool (run_command's docstring)
+        r.check("two escapes leave no active command", resp.obj.get("active_action") is None,
+                short(resp.obj.get("active_action")))
         if resp.obj.get("active_action"):
             api.post("command", {"command": "escape"}, q)   # leave the drawing idle; not a check
         resp = api.post("command", {"command": ""}, q)
@@ -1237,6 +1245,22 @@ def step_negative(r: Runner, api: ApiClient, st: State) -> None:
         r.check("an unknown body field -> 400 unknown_field",
                 resp.status == 400 and resp.error == "unknown_field"
                 and resp.obj.get("field", "bogus") == "bogus", resp)
+        resp = api.get("drawing", {"doc": doc, "detial": "full"})
+        r.expect("an unknown query parameter -> 400 unknown_field", resp, 400, "unknown_field")
+        resp = api.get("drawing", [("doc", doc), ("doc", doc)])
+        r.expect("doc given twice -> 400 bad_param", resp, 400, "bad_param")
+        # a NUL would cut the name the system opens: run.bat would be written as a ".dxf"
+        resp = api.post("documents/export", {"path": str(st.out_dir / "run.bat") + "\x00.dxf", "format": "dxf"}, q,
+                        timeout=LONG_TIMEOUT)
+        r.expect("a path with a NUL -> 400 bad_path", resp, 400, "bad_path")
+        r.check("nothing was written", not (st.out_dir / "run.bat").exists())
+        # a connection that sends nothing holds up nobody else
+        with socket.create_connection((api.host, api.port), timeout=5):
+            started = time.monotonic()
+            resp = api.get("status")
+            took = time.monotonic() - started
+        r.check("an idle connection does not hold up /status", resp.status == 200 and took < 3.0,
+                f"{took:.2f} s, {resp.status}")
 
 
 def step_mcp(r: Runner, api: ApiClient, st: State, args: argparse.Namespace, workdir: Path,
