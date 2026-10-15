@@ -1589,7 +1589,9 @@ bool dwgReader21::readDwgClasses(){
     // next byte boundary and the END sentinel follows it. The string data
     // itself ends before that footer and cannot locate the CRC.
     crcPosition = footerEndBit / 8 + 1;
-    if (!dwgSafety::range(crcPosition, 2, buff.size())) {
+    if (!dwgSafety::range(crcPosition, 2, buff.size())
+        || crcPosition > static_cast<std::uint64_t>(
+               std::numeric_limits<std::int32_t>::max() - 1)) {
         recordFailure(DwgIntegrityCheckKind::PageRange, si.Id);
         return false;
     }

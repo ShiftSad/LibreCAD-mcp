@@ -8191,10 +8191,10 @@ TEST_CASE("DRW_Dictionary rejects a body that crosses its AC1027 boundary",
     CHECK(rejected.m_entries.empty());
 }
 
-// AutoCAD 2018+ (AC1032) writes dictionary pairs whose item handle is null:
-// ACAD_PARALLEL_BACKGROUND in the named-object dictionary's ACAD_BACKGROUND
-// dictionary (owner 0xC), and empty-named slots such as those seen in the
-// named-object dictionary and the FBXASSET/ACAD_XREC_ROUNDTRIP extension
+// AutoCAD writes dictionary pairs whose item handle is null (in files of every
+// version from R13 on; this test uses AC1032): ACAD_PARALLEL_BACKGROUND in the
+// named-object dictionary's ACAD_BACKGROUND dictionary (owner 0xC), and
+// empty-named slots such as those seen in the named-object dictionary and the FBXASSET/ACAD_XREC_ROUNDTRIP extension
 // dictionaries. The encoder cannot produce them, so the frame is assembled by
 // hand in the R2013+ layout.
 TEST_CASE("DRW_Dictionary drops AC1032 entries with a null item handle",
@@ -11315,8 +11315,10 @@ TEST_CASE("DRW_CellStyleMap reads legacy cell styles with a real object size",
     }
 
     // objSize must sit between the end of the data stream and the handle
-    // stream: one inside the body, past the buffer or past the handles is
-    // rejected without publishing anything.
+    // stream. One inside the body or past the buffer is rejected, and so is
+    // one at the end of the handles, because it leaves no handle data to
+    // read (a frame with bytes after its handles could not tell). Nothing is
+    // published and the handle the preamble set is cleared again.
     for (const DRW::Version ver : {DRW::AC1015, DRW::AC1018}) {
         for (const ObjectSize objectSize :
              {ObjectSize::BeforeBodyEnd, ObjectSize::PastBuffer,
@@ -11332,6 +11334,7 @@ TEST_CASE("DRW_CellStyleMap reads legacy cell styles with a real object size",
                                                          &reader));
             CHECK_FALSE(reader.isGood());
             CHECK(rejected.m_cellStyles.empty());
+            CHECK(rejected.handle == 0u);
             CHECK(rejected.parentHandle == 0);
             CHECK(rejected.reactorHandles.empty());
             CHECK(rejected.xDictHandle == 0u);

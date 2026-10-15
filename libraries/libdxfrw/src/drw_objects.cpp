@@ -8151,9 +8151,10 @@ bool DRW_Dictionary::parseDwgImpl(DRW::Version version, dwgBuffer *buf,
             return false;
         // AutoCAD writes pairs whose item handle is null: a named key with no
         // object (ACAD_PARALLEL_BACKGROUND in the named-object dictionary's
-        // ACAD_BACKGROUND dictionary) and empty-named slots (seen in the
-        // named-object dictionary and the FBXASSET/ACAD_XREC_ROUNDTRIP
-        // extension dictionaries). Such a pair is consumed with the counted
+        // ACAD_BACKGROUND dictionary) and empty-named slots (for example in
+        // the named-object dictionary, its variable dictionary and the
+        // FBXASSET/ACAD_XREC_ROUNDTRIP extension dictionaries, in files of
+        // every version from R13 on). Such a pair is consumed with the counted
         // stream but names no member, so it is not published; every
         // published entry keeps a name and a non-null item. Only a null that
         // carries an ownership code is dropped: any other null, such as the
