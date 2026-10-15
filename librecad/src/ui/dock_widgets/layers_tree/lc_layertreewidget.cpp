@@ -953,7 +953,9 @@ void LC_LayerTreeWidget::removeEmptyLayers(){
     };
     const RS_Graphic* graphic = m_document->getGraphic();
     if (graphic != nullptr) {
-        graphic->visitDrawingEntities(noteLayer);
+        // Deleted entities too, as model space alone was searched: an undo
+        // may restore them, on their layer.
+        graphic->visitDrawingEntities(noteLayer, true);
     } else {
         for (const auto en: *m_document) {
             noteLayer(en);
@@ -1846,11 +1848,17 @@ void LC_LayerTreeWidget::doRemoveLayerItems(QList<LC_LayerTreeItem *> &itemsToRe
  * @param layers list of layers to remove
  */
 void LC_LayerTreeWidget::doRemoveLayers(QList<RS_Layer *> &layers) const {
+    // A layer the layouts' entities are on stays (RS_Graphic::removeLayer()):
+    // when none goes, the drawing is as it was.
+    bool removed = false;
     for (const auto layer: layers) {
         RS_Graphic *graphic = m_document->getGraphic();
-        if (graphic != nullptr){
-            graphic->removeLayer(layer);
+        if (graphic != nullptr && graphic->removeLayer(layer)){
+            removed = true;
         }
+    }
+    if (!removed) {
+        return;
     }
     m_document->updateInserts();
     m_document->calculateBorders();

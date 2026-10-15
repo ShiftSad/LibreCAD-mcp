@@ -27,6 +27,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <QList>
+#include <QStringList>
 
 #include "lc_actiontestsupport.h"
 #include "lc_paperspacestore.h"
@@ -35,6 +36,7 @@
 #include "rs_dialogfactory.h"
 #include "rs_dialogfactoryinterface.h"
 #include "rs_insert.h"
+#include "rs_layer.h"
 #include "rs_line.h"
 
 namespace {
@@ -53,12 +55,15 @@ public:
         ++m_asked;
         return m_answer;
     }
+    void commandMessage(const QString& message) override { m_messages << message; }
 
     int asked() const { return m_asked; }
+    const QStringList& messages() const { return m_messages; }
 
 private:
     QList<RS_Block*> m_answer;
     int m_asked = 0;
+    QStringList m_messages;
 };
 
 RS_Block* addBlock(RS_Graphic& graphic, const QString& name) {
@@ -112,6 +117,38 @@ TEST_CASE("Removing a block removes its INSERTs in model space, in blocks and on
         CHECK_FALSE(insert->isDeleted());
     }
     CHECK_FALSE(removed->isDeleted());
+}
+
+TEST_CASE("A block an INSERT on a layout's locked layer uses stays", "[actions][blocks][paper-space]") {
+    lc::test::ActionFixture<RS_ActionBlocksRemove> f;
+    RS_Graphic& graphic = f.m_graphic;
+
+    RS_Block* kept = addBlock(graphic, QStringLiteral("FRAME"));
+    RS_Block* removed = addBlock(graphic, QStringLiteral("LOGO"));
+    auto* locked = new RS_Layer(QStringLiteral("LOCKED"));
+    graphic.addLayer(locked);
+    locked->lock(true);
+    RS_Insert* inModel = addInsert(graphic, QStringLiteral("FRAME"), 0.);
+    RS_EntityContainer* layout = graphic.paperSpaces().container(QStringLiteral("*Paper_Space0"));
+    REQUIRE(layout != nullptr);
+    // A locked entity is not deleted: removing the block would leave this
+    // INSERT naming a block that is gone, on a layout no view shows.
+    RS_Insert* onLockedLayer = addInsert(*layout, QStringLiteral("FRAME"), 10.);
+    onLockedLayer->setLayer(locked);
+    RS_Insert* logo = addInsert(*layout, QStringLiteral("LOGO"), 20.);
+
+    RemovalDialogs dialogs({kept, removed});
+    f.m_action->init(0);
+
+    CHECK_FALSE(kept->isDeleted());
+    CHECK_FALSE(inModel->isDeleted());
+    CHECK_FALSE(onLockedLayer->isDeleted());
+    CHECK(graphic.findBlock(QStringLiteral("FRAME")) == kept);
+    REQUIRE(dialogs.messages().size() == 1);
+    CHECK(dialogs.messages().front().contains(QStringLiteral("\"FRAME\" is not removed")));
+    // The other block goes, with its INSERT.
+    CHECK(removed->isDeleted());
+    CHECK(logo->isDeleted());
 }
 
 TEST_CASE("The INSERTs of a block are found in one pass", "[actions][blocks]") {

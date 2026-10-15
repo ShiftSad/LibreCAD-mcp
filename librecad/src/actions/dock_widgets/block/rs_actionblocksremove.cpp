@@ -31,6 +31,7 @@
 #include "rs_dialogfactoryinterface.h"
 #include "rs_graphic.h"
 #include "rs_insert.h"
+#include "rs_layer.h"
 
 class RS_BlockList;
 
@@ -71,25 +72,44 @@ bool RS_ActionBlocksRemove::doTriggerModifications(LC_DocumentModificationBatch&
         containerList.push_back(blockList->at(bi));
     }
     // The layouts' entities too, though no view shows them.
+    const std::size_t firstLayout = containerList.size();
     for (const auto& paperSpace : m_graphic->paperSpaces().spaces()) {
         containerList.push_back(paperSpace.entities.get());
     }
 
+    bool removing = false;
     for (const auto block: std::as_const(blocks)) {
         if (nullptr == block) {
             continue;
         }
-        // Remove every INSERT of the block. ctx -= only lists an entity for
-        // removal, which happens once this returns: one pass per container
-        // finds each of them, where repeating the search until none was left
-        // never ended.
-        for (const auto cont: containerList) {
-            for (const auto insert : insertsOf(*cont, block->getName())) {
-                if (!ctx.entitiesToDelete.contains(insert)) {
-                    ctx -= insert;
+        // Every INSERT of the block. ctx -= only lists an entity for removal,
+        // which happens once this returns: one pass per container finds each
+        // of them, where repeating the search until none was left never
+        // ended. An INSERT is in one container and of one block, so none is
+        // listed twice.
+        QList<RS_Entity*> inserts;
+        int lockedOnLayouts = 0;
+        for (std::size_t i = 0; i < containerList.size(); ++i) {
+            for (const auto insert : insertsOf(*containerList[i], block->getName())) {
+                const RS_Layer* layer = insert->getLayer(true);
+                if (i >= firstLayout && layer != nullptr && layer->isLocked()) {
+                    ++lockedOnLayouts;
                 }
+                inserts.append(insert);
             }
         }
+        // An INSERT on a locked layer is not deleted, and would be left
+        // naming a block that is gone. On a layout no view shows it, to
+        // unlock its layer: the block stays.
+        if (lockedOnLayouts > 0) {
+            RS_DIALOGFACTORY->commandMessage(
+                tr("Block \"%1\" is not removed: %n of its insert(s) on the drawing's paper-space "
+                   "layouts are on a locked layer.", "", lockedOnLayouts)
+                    .arg(block->getName()));
+            continue;
+        }
+        ctx -= inserts;
+        removing = true;
 
         // clear selection and active state
         block->selectedInBlockList(false);
@@ -102,6 +122,10 @@ bool RS_ActionBlocksRemove::doTriggerModifications(LC_DocumentModificationBatch&
 
         // Now remove block from the block list, but do not delete:
         ctx -= block;
+    }
+    if (!removing) {
+        finish();
+        return false;
     }
 
     m_graphic->addBlockNotification();

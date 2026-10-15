@@ -101,8 +101,8 @@ public:
 
     /** Renames the block a paper-space INSERT refers to. */
     void renameInserts(const QString& oldName, const QString& newName);
-    /** Number of entities on the layer named @p layerName, deleted ones left
-     *  out. */
+    /** Number of entities on the layer named @p layerName, deleted ones
+     *  included: an undo may restore those, on that layer. */
     unsigned countOnLayer(const QString& layerName) const;
 
 private:

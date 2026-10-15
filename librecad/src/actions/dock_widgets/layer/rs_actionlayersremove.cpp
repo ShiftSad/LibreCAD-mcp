@@ -42,10 +42,15 @@ void RS_ActionLayersRemove::trigger() {
         QStringList names =
             RS_DIALOGFACTORY->requestSelectedLayersRemovalDialog(ll);
 
-        if (!names.isEmpty()) {
-            for (const auto& name : std::as_const(names)) {
-                m_graphic->removeLayer(ll->find(name));
+        // A layer the layouts' entities are on stays
+        // (RS_Graphic::removeLayer()): when none goes, nothing changed.
+        bool removed = false;
+        for (const auto& name : std::as_const(names)) {
+            if (m_graphic->removeLayer(ll->find(name))) {
+                removed = true;
             }
+        }
+        if (removed) {
             m_graphic->updateInserts();
             m_document->calculateBorders();
             // m_graphic->getLayerList()->getLayerWitget()->slotUpdateLayerList();

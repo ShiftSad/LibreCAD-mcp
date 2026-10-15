@@ -120,11 +120,13 @@ public:
     int updateDimensions(bool autoText = true) override;
     /**
      * Calls @p visit with each entity the drawing holds itself: those of model
-     * space, of every block and of every layout's paper space, deleted ones
-     * and deleted blocks left out. An entity's own parts (the lines of a
-     * dimension, the glyphs of a text) are not visited.
+     * space, of every block and of every layout's paper space, deleted blocks
+     * left out, and deleted entities too only @p withDeleted (an undo may
+     * restore those). An entity's own parts (the lines of a dimension, the
+     * glyphs of a text) are not visited.
      */
-    void visitDrawingEntities(const std::function<void(RS_Entity*)>& visit) const;
+    void visitDrawingEntities(const std::function<void(RS_Entity*)>& visit,
+                              bool withDeleted = false) const;
     /**
      * Whether the import of a file into this drawing reports what it noticed
      * (such as content kept on paper-space layouts) to the user. Only the

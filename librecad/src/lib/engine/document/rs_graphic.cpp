@@ -250,10 +250,11 @@ int RS_Graphic::updateDimensions(const bool autoText) {
     return updated;
 }
 
-void RS_Graphic::visitDrawingEntities(const std::function<void(RS_Entity*)>& visit) const {
-    const auto visitContainer = [&visit](const RS_EntityContainer& container) {
+void RS_Graphic::visitDrawingEntities(const std::function<void(RS_Entity*)>& visit,
+                                      const bool withDeleted) const {
+    const auto visitContainer = [&visit, withDeleted](const RS_EntityContainer& container) {
         for (RS_Entity* entity : container) {
-            if (entity != nullptr && !entity->isDeleted()) {
+            if (entity != nullptr && (withDeleted || !entity->isDeleted())) {
                 visit(entity);
             }
         }

@@ -1003,6 +1003,45 @@ TEST_CASE("A layout a DWG cannot write is left out of a DWG save, and known to b
     CHECK(paperSpaceCount(reopened, QStringLiteral("*Paper_Space0")) == 0);
 }
 
+TEST_CASE("A layer a deleted layout entity is on stays, for an undo to restore it",
+          "[dxf][paper-space]") {
+    REQUIRE(lc::test::ensureSettings());
+    lc::test::QuietLog quiet;
+    lc::test::OutputDirectory directory("lc_dxf_paper_space_deleted_layer");
+    std::string text = layoutsDxf();
+    const std::string modelInsert = "0\nINSERT\n5\n54\n330\n1F\n100\nAcDbEntity\n8\n0\n";
+    const auto at = text.find(modelInsert);
+    REQUIRE(at != std::string::npos);
+    text.replace(at, modelInsert.size(),
+                 "0\nINSERT\n5\n54\n330\n1E\n100\nAcDbEntity\n67\n1\n8\nFRAME\n");
+    const auto source = directory.file("layouts_r2000.dxf");
+    writeText(source, text);
+    RS_Graphic graphic;
+    REQUIRE(lc::test::importDrawing(graphic, source, RS2::FormatDXFRW));
+    RS_Layer* layer = graphic.findLayer(QStringLiteral("FRAME"));
+    REQUIRE(layer != nullptr);
+
+    // As removing its block does: the INSERT is deleted, and an undo
+    // restores it, on its layer.
+    RS_EntityContainer* active = graphic.paperSpaces().container(LC_PaperSpaceStore::activeName());
+    RS_Entity* insert = nullptr;
+    for (RS_Entity* entity : *active) {
+        if (entity->rtti() == RS2::EntityInsert)
+            insert = entity;
+    }
+    REQUIRE(insert != nullptr);
+    insert->setFlag(RS2::FlagDeleted);
+    CHECK(graphic.paperSpaces().countOnLayer(QStringLiteral("FRAME")) == 1);
+    CHECK_FALSE(graphic.removeLayer(layer));
+    CHECK(graphic.findLayer(QStringLiteral("FRAME")) == layer);
+    // The search for empty layers sees it too.
+    bool seen = false;
+    graphic.visitDrawingEntities([&seen, layer](RS_Entity* entity) {
+        seen = seen || entity->getLayer() == layer;
+    }, true);
+    CHECK(seen);
+}
+
 // Converts one drawing for a look with another program:
 //   LC_PAPER_SPACE_IN=<.dxf|.dwg> LC_PAPER_SPACE_OUT=<.dxf|.dwg> \
 //   [LC_PAPER_SPACE_VERSION=r12|r14|r2000|r2007|r2018|dwg2000|...|dwg2018] \
