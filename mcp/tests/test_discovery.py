@@ -82,3 +82,29 @@ def test_unusable_files_raise_without_echoing_the_token(tmp_path, data, needle):
 def test_invalid_json(tmp_path):
     with pytest.raises(ValueError, match="not valid JSON"):
         read_discovery(write(tmp_path, None, raw="{oops"))
+
+
+def test_pid_alive():
+    import os
+    import subprocess
+    import sys
+
+    from librecad_mcp.discovery import is_stale, pid_alive
+    assert pid_alive(os.getpid())
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    assert not pid_alive(proc.pid)
+    # no usable pid: cannot tell, so the file is not called stale
+    for value in (None, "12", 0, -5, True):
+        assert pid_alive(value)
+    assert is_stale({"pid": proc.pid}) and not is_stale({"pid": os.getpid()}) and not is_stale({})
+
+
+def test_snap_discovery_files_are_found(tmp_path):
+    from librecad_mcp.discovery import default_paths
+    snap = tmp_path / "snap" / "librecad-mcp" / "current" / ".local" / "share" / "LibreCAD" / "LibreCAD-2"
+    snap.mkdir(parents=True)
+    (snap / "remote-api.json").write_text("{}", encoding="utf-8")
+    paths = default_paths("linux", env={}, home=tmp_path)
+    assert paths[0] == tmp_path / ".local" / "share" / "LibreCAD" / "LibreCAD-2" / "remote-api.json"
+    assert snap / "remote-api.json" in paths

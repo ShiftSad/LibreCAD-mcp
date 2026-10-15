@@ -36,6 +36,7 @@ def test_windows_path_is_normalized():
     (r"C:\a\plan.dxf:stream", "bad_path"),      # alternate data stream
     (r"C:\a\CON.dxf", "bad_path"),              # device name
     (r"C:\a\nul.dwg", "bad_path"),
+    (r"C:\a\CONIN$.dxf", "bad_path"),           # console device, as LibreCAD refuses it
     ("", "bad_path"),
     ("${user_config.path}", "bad_path"),
     ("~/plan.dxf", "bad_path"),
@@ -173,3 +174,14 @@ def test_without_a_prompt():
     out = confirmation_refusal(None, False, "Delete it?", False)
     assert out == {"error": "confirmation_required", "message": "Delete it?", "hint": out["hint"]}
     assert "user_confirmed=True" in out["hint"]
+
+
+@pytest.mark.parametrize("windows", [True, False])
+@pytest.mark.parametrize("bad", [chr(0), chr(1), chr(10), chr(0x1F), chr(0x7F)])
+def test_control_characters_are_refused(windows, bad):
+    # "run.bat<NUL>.dxf" would pass the .dxf check while the system opens run.bat
+    path = ("C:/a/run.bat" if windows else "/a/run.bat") + bad + ".dxf"
+    with pytest.raises(BlockedByPolicy) as exc:
+        check_path(path, "export", "dxf", windows=windows, env={})
+    assert exc.value.body["reason"] == "bad_path"
+    assert bad not in exc.value.body["path"]

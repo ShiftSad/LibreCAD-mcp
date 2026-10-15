@@ -9,7 +9,7 @@
     "subfolder": "mcp"
   },
   "version": "0.1.0",
-  "websiteUrl": "https://github.com/ShiftSad/LibreCAD-mcp/tree/master/mcp",
+  "websiteUrl": "https://github.com/ShiftSad/LibreCAD-mcp/tree/v2.2.2.6-mcp.1/mcp",
   "_meta": {
     "io.modelcontextprotocol.registry/publisher-provided": {
       "published": false,
@@ -18,9 +18,8 @@
       "environmentVariables": [
         {
           "name": "LIBRECAD_API_URL",
-          "description": "LibreCAD Remote API address; by default the one in LibreCAD's discovery file, else http://127.0.0.1:13140",
-          "isRequired": false,
-          "default": "http://127.0.0.1:13140"
+          "description": "LibreCAD Remote API address; leave it unset: by default the one in LibreCAD's discovery file, else http://127.0.0.1:13140",
+          "isRequired": false
         },
         {
           "name": "LIBRECAD_API_TOKEN",

@@ -157,6 +157,19 @@ async def test_long_operations_use_the_50_second_cap():
     assert route.calls.last.request.extensions["timeout"]["read"] == 50.0
 
 
+@respx.mock
+async def test_the_client_tells_librecad_its_deadline():
+    # LibreCAD answers 504 (with "started") before this call gives up, and never runs a request
+    # whose caller is gone
+    status = respx.get(f"{API}/status").mock(return_value=httpx.Response(200, json={}))
+    open_ = respx.post(f"{API}/documents/open").mock(return_value=httpx.Response(201, json={}))
+    async with client() as c:  # 5 s
+        await c.status()
+        await c.open_document("C:/a.dxf")  # 50 s
+    assert status.calls.last.request.headers["x-request-timeout-ms"] == "4500"
+    assert open_.calls.last.request.headers["x-request-timeout-ms"] == "48000"
+
+
 def test_proxies_from_the_environment_are_ignored(monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:3128")
     c = client()

@@ -7,6 +7,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Security
+- `delete_layer` finds the layer as LibreCAD does (Unicode NFC) and asks about, then deletes, that
+  layer by its listed name: another spelling of the name no longer skips the confirmation. An
+  unknown name gives `unknown_layer` without a delete.
+- A discovery file left by a LibreCAD that no longer runs is never used, so its token is not sent
+  to whatever listens on that port now.
+- Paths with control characters (a NUL cuts the name the system opens) are refused.
+
+### Changed
+- Every request tells LibreCAD the client's deadline (`X-Request-Timeout-Ms`): LibreCAD answers
+  `ui_timeout` (with `started`) before the call gives up, and never runs it afterwards.
+- `create_layer`/`update_layer` take a layer lineweight (`"Default"` or mm); `set_view` takes a
+  factor > 1; `insert_block` (and `insert` specs) accept a negative, mirroring scale.
+- The `.mcpb` carries the server and runs it before falling back to git; `LIBRECAD_MCP_SOURCE`
+  overrides both. The documentation runs it from a checkout until a release tag is published;
+  `scripts/check-release.sh` is the release gate. The package and the extension carry the full
+  GPL text.
+- Docstrings, the guide and the prompts: `select_entities` combines ids and filters (AND);
+  `run_command` needs `escape` twice to leave a drawing tool; `measure` lists its reply shapes and
+  measures length of curves only; `close_document` says this server asks, not LibreCAD; the
+  `convert-file` prompt leaves a drawing open that was already open; ellipse angles are parametric;
+  linetypes come back in upper case.
+- The snap's discovery file (`~/snap/librecad*/current/...`) is found on Linux.
+
 ## [0.1.0] - unreleased
 
 First version, for LibreCAD-mcp `v2.2.2.6-mcp.1` (Remote API v1).

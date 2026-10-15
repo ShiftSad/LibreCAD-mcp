@@ -21,8 +21,8 @@ dependencies = ["mcp>=2.2,<3", "httpx>=0.27,<1"]
 [project.urls]
 Homepage = "https://github.com/ShiftSad/LibreCAD-mcp"
 Repository = "https://github.com/ShiftSad/LibreCAD-mcp"
-Documentation = "https://github.com/ShiftSad/LibreCAD-mcp/tree/master/mcp#readme"
-Changelog = "https://github.com/ShiftSad/LibreCAD-mcp/blob/master/mcp/CHANGELOG.md"
+Documentation = "https://github.com/ShiftSad/LibreCAD-mcp/tree/v2.2.2.6-mcp.1/mcp#readme"
+Changelog = "https://github.com/ShiftSad/LibreCAD-mcp/blob/v2.2.2.6-mcp.1/mcp/CHANGELOG.md"
 Issues = "https://github.com/ShiftSad/LibreCAD-mcp/issues"
 
 [project.optional-dependencies]

@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .discovery import default_paths, read_discovery
+from .discovery import default_paths, is_stale, read_discovery
 from .errors import ConfigError
 from .guard import env_value
 
@@ -86,13 +86,14 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
                 disc = read_discovery(disc_path) if disc_path else None
             except ValueError:
                 disc = None
-            if disc:
+            if disc and not is_stale(disc):
                 return Config(disc["url"], token, timeout, "LIBRECAD_API_TOKEN", str(disc_path))
             url = DEFAULT_URL
         return Config(url, token, timeout, "LIBRECAD_API_TOKEN", None)
 
     explicit = _explicit_discovery(env)
     candidates = [explicit] if explicit else default_paths(env=env)
+    stale: list[str] = []
     for path in candidates:
         try:
             disc = read_discovery(path)
@@ -100,11 +101,18 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             raise ConfigError(f"{e}. {ENABLE_HINT}") from e
         if disc is None:
             continue
+        if is_stale(disc):
+            # Left behind by a LibreCAD that was killed or crashed: never send its token anywhere.
+            stale.append(f"{path} (process {disc.get('pid')} is not running)")
+            continue
         disc_token = _check_token(disc["token"], f"discovery file {path}")
         return Config(url or disc["url"], disc_token, timeout, "discovery file", str(path))
 
-    where = " or ".join(str(p) for p in candidates)
     origin = " (LIBRECAD_API_DISCOVERY)" if explicit else ""
+    if stale:
+        raise ConfigError(f"LibreCAD not reachable: the Remote API discovery file {'; '.join(stale)}{origin} "
+                          f"was left by a LibreCAD that is no longer running. {ENABLE_HINT}")
+    where = " or ".join(str(p) for p in candidates)
     raise ConfigError(f"LibreCAD not reachable: no Remote API discovery file at {where}{origin}, "
                       f"so LibreCAD is not running with its Remote API enabled. {ENABLE_HINT}")
 

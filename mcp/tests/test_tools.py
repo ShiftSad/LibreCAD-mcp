@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """The tools against the stateful fake LibreCAD (tests/fake_librecad.py)."""
 import json
+import os
 import socket
+import subprocess
+import sys
 
 import pytest
 from mcp.server.mcpserver import Image
@@ -33,16 +36,42 @@ async def test_not_reachable_without_librecad():
     assert "not reachable" in out["error"] and "Remote API (MCP)" in out["error"]
 
 
-async def test_not_reachable_with_a_stale_discovery_file(tmp_path, monkeypatch):
+async def test_not_reachable_when_nothing_listens(tmp_path, monkeypatch):
     with socket.socket() as s:  # a port nothing listens on
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     p = tmp_path / "remote-api.json"
-    p.write_text(json.dumps({"url": f"http://127.0.0.1:{port}", "token": "t", "pid": 1}), encoding="utf-8")
+    p.write_text(json.dumps({"url": f"http://127.0.0.1:{port}", "token": "t", "pid": os.getpid()}),
+                 encoding="utf-8")
     monkeypatch.setenv("LIBRECAD_API_DISCOVERY", str(p))
     out = await srv.get_status()
     assert out["error"].startswith(f"LibreCAD not reachable at http://127.0.0.1:{port}")
     assert out["connection"]["discovery_file"] == str(p)
+
+
+async def test_a_stale_discovery_file_sends_the_token_nowhere(tmp_path, monkeypatch):
+    # LibreCAD was killed and left its file; another program listens on the port now
+    received = []
+    with socket.socket() as squatter:
+        squatter.bind(("127.0.0.1", 0))
+        squatter.listen(1)
+        squatter.settimeout(0.2)
+        port = squatter.getsockname()[1]
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        p = tmp_path / "remote-api.json"
+        p.write_text(json.dumps({"url": f"http://127.0.0.1:{port}", "token": "the-token", "pid": proc.pid}),
+                     encoding="utf-8")
+        monkeypatch.setenv("LIBRECAD_API_DISCOVERY", str(p))
+        out = await srv.get_status()
+        try:
+            conn, _ = squatter.accept()
+            received.append(conn.recv(4096))
+            conn.close()
+        except OSError:
+            pass
+    assert "no longer running" in out["error"]
+    assert not received
 
 
 async def test_wrong_token(fake, monkeypatch):
@@ -522,6 +551,58 @@ async def test_selection(fake, doc):
     assert requests(fake, "POST", "/selection")[-1]["body"] == {
         "mode": "set", "bbox": [0, 0, 1, 1], "bbox_mode": "window"}
     assert (await srv.select_entities("clear"))["count"] == 0
+
+
+async def test_selection_ids_and_filters_combine(fake, doc):
+    ids = (await call("add_entities", {"entities": [{"type": "line", "start": [0, 0], "end": [1, 0]},
+                                                    {"type": "circle", "center": [5, 5], "radius": 1}]}))["ids"]
+    # as LibreCAD: an entity must match the ids AND the filters
+    assert (await srv.select_entities("set", entity_ids=ids, types=["line"]))["ids"] == [ids[0]]
+    missing = await srv.select_entities("set")
+    assert missing["error"] == "missing_param" and missing["param"] == "ids"
+    assert (await srv.select_entities("all", types=["circle"]))["ids"] == sorted(ids)
+    assert (await srv.select_entities("remove", layers=["0"]))["count"] == 0
+    assert (await srv.select_entities("set", layers=["nope"]))["error"] == "unknown_layer"
+    assert (await srv.query_entities(layers=["nope"]))["error"] == "unknown_layer"
+
+
+async def test_layer_lineweight_is_a_width_or_default(fake, doc):
+    for bad in ("ByLayer", "ByBlock"):
+        result = await call_raw("create_layer", {"name": "x", "lineweight_mm": bad})
+        assert result.is_error  # the schema offers what a layer can take only
+        result = await call_raw("update_layer", {"name": "0", "lineweight_mm": bad})
+        assert result.is_error
+    assert requests(fake, "POST", "/layers") == [] and requests(fake, "PATCH") == []
+    out = await call("create_layer", {"name": "x", "lineweight_mm": "Default"})
+    assert out["layer"]["lineweight"] == "Default"
+    # the fake refuses them as LibreCAD does
+    assert (await srv.create_layer("y", lineweight_mm="ByLayer"))["error"] == "bad_param"
+
+
+async def test_linetypes_come_back_in_upper_case(fake, doc):
+    out = await call("add_entities", {"entities": [{"type": "line", "start": [0, 0], "end": [1, 0],
+                                                    "linetype": "Dashed"}]})
+    assert out["created"][0]["linetype"] == "DASHED"
+    assert (await srv.list_layers())["layers"][0]["linetype"] == "CONTINUOUS"
+
+
+async def test_set_view_factor_is_greater_than_one(fake, doc):
+    for factor in (0.5, 1, 1001):
+        result = await call_raw("set_view", {"action": "zoom_out", "factor": factor})
+        assert result.is_error
+    assert requests(fake, "POST", "/view") == []
+    assert "window" in await call("set_view", {"action": "zoom_out", "factor": 2})
+
+
+async def test_insert_block_may_mirror_with_a_negative_scale(fake, doc):
+    fake.docs[doc.id].blocks["B"] = {"name": "B", "base_point": [0, 0], "entity_count": 1, "frozen": False}
+    await call("insert_block", {"name": "B", "position": [0, 0], "scale": [-1, 1]})
+    assert requests(fake, "POST", "/blocks/B/insert")[-1]["body"]["scale"] == [-1, 1]
+    for bad in (0, [0, 1]):
+        assert (await call_raw("insert_block", {"name": "B", "position": [0, 0], "scale": bad})).is_error
+    # transform factors stay positive: a flip is a mirror
+    assert (await call_raw("transform_entities", {"entity_ids": [1], "operation": "scale", "base": [0, 0],
+                                                  "factor": -1})).is_error
 
 
 async def test_measure(fake, doc):

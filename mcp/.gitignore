@@ -10,3 +10,6 @@ node_modules/
 # release artifacts made by scripts/cut-release.sh
 *.mcpb
 *.mcpb.sha256
+# the server and license scripts/cut-release.sh packs into the extension
+mcpb/server/python/
+mcpb/LICENSE

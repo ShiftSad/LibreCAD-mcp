@@ -116,6 +116,17 @@ def allow_only(body: dict, keys) -> None:
             raise FakeError(400, "unknown_field", f"unknown field '{k}'", field=k)
 
 
+def linetype_out(value):
+    """LibreCAD reads linetype names in any case and writes them in upper case (ByLayer/ByBlock stay)."""
+    if isinstance(value, str) and value.lower() not in ("bylayer", "byblock"):
+        return value.upper()
+    return value
+
+
+# measure kind=length: curves only
+HAS_LENGTH = {"line", "arc", "circle", "ellipse", "polyline", "spline", "parabola", "hyperbola"}
+
+
 def need(body: dict, key: str):
     if key not in body:
         raise FakeError(400, "missing_param", f"'{key}' is required", param=key)
@@ -140,7 +151,7 @@ class Doc:
 
     @staticmethod
     def _layer(name: str, color: str = "#ffffff", aci: int | None = 7) -> dict:
-        return {"name": name, "color": color, "aci": aci, "linetype": "Continuous", "lineweight": "Default",
+        return {"name": name, "color": color, "aci": aci, "linetype": "CONTINUOUS", "lineweight": "Default",
                 "frozen": False, "locked": False, "printable": True, "construction": False}
 
     def snapshot(self) -> None:
@@ -278,6 +289,8 @@ class FakeLibreCAD:
         return doc
 
     def doc(self, query: dict) -> Doc:
+        if len(query.get("doc", [])) > 1:
+            raise FakeError(400, "bad_param", "'doc' is given more than once", param="doc")
         if "doc" in query:
             try:
                 doc_id = int(query["doc"][0])
@@ -579,9 +592,13 @@ class FakeLibreCAD:
                 layer["color"], layer["aci"] = c.lower(), None
             else:
                 raise FakeError(400, "bad_param", "layer color must be #rrggbb or 1..255", param="color")
+        lw = body.get("lineweight")
+        if isinstance(lw, str) and lw.lower() in ("bylayer", "byblock"):
+            raise FakeError(400, "bad_param", "a layer lineweight is Default or a width in mm", param="lineweight",
+                            allowed=["Default", *LINEWEIGHTS_MM])
         for key in ("linetype", "lineweight", "frozen", "locked", "printable", "construction"):
             if key in body:
-                layer[key] = body[key]
+                layer[key] = linetype_out(body[key]) if key == "linetype" else body[key]
 
     def h_create_layer(self, q, body):
         allow_only(body, {"name", "color", "linetype", "lineweight", "frozen", "locked", "printable",
@@ -691,7 +708,7 @@ class FakeLibreCAD:
     def _store(self, d: Doc, spec: dict, layer: str) -> dict:
         e = {k: v for k, v in spec.items() if k not in ATTRS}
         e.update({"id": self.next_entity, "layer": layer, "color": spec.get("color", "ByLayer"),
-                  "linetype": spec.get("linetype", "ByLayer"), "lineweight": spec.get("lineweight", "ByLayer"),
+                  "linetype": linetype_out(spec.get("linetype", "ByLayer")), "lineweight": spec.get("lineweight", "ByLayer"),
                   "handle": None, "visible": True, "locked": False, "selected": False})
         self._derive(e)
         d.entities[self.next_entity] = e
@@ -767,6 +784,8 @@ class FakeLibreCAD:
         d = self.doc(q)
         types = [t for v in q.get("type", []) for t in v.split(",")]
         layers = q.get("layer", [])
+        for name in layers:
+            self._layer(d, name)
         out = []
         for e in d.entities.values():
             if types and e["type"] not in types:
@@ -905,6 +924,18 @@ class FakeLibreCAD:
             bx, by = need(body, "base")
             fac = need(body, "factor")
             fx, fy = (fac, fac) if isinstance(fac, (int, float)) else fac
+            if fx == 0 or fy == 0:
+                raise FakeError(400, "bad_param", "'factor' must not be zero", param="factor")
+            if fx < 0 or fy < 0:
+                raise FakeError(400, "bad_param", "'factor' must be > 0; to flip entities use op mirror",
+                                param="factor")
+            if fx != fy:
+                refused = {str(i): "cannot be scaled by different x and y factors" for i in ids
+                           if d.entities[i]["type"] in ("text", "mtext", "hatch")
+                           or (d.entities[i]["type"] == "polyline"
+                               and any(len(v) > 2 and v[2] for v in d.entities[i].get("vertices", [])))}
+                if refused:
+                    raise FakeError(422, "invalid_entity", "nothing was changed", errors=refused)
 
             def f(p, k=1):
                 return [bx + (p[0] - bx) * fx ** k, by + (p[1] - by) * fy ** k]
@@ -952,26 +983,61 @@ class FakeLibreCAD:
         return {"ids": sorted(d.selection), "count": len(d.selection)}
 
     def h_set_selection(self, q, body):
+        """As LibreCAD: ids and the filters (type, layer, bbox) combine with AND; set/add/remove need ids
+        or a filter (else 400 missing_param ids); all applies the filters to every entity."""
         allow_only(body, {"mode", "ids", "bbox", "bbox_mode", "type", "layer"})
         d = self.doc(q)
         mode = need(body, "mode")
-        ids = set(body.get("ids") or [])
-        unknown = [i for i in ids if i not in d.entities]
-        if unknown:
-            raise FakeError(404, "unknown_entity", ids=unknown)
-        for e in d.entities.values():
-            if (body.get("type") and e["type"] in body["type"]) or (body.get("layer") and e["layer"] in body["layer"]):
-                ids.add(e["id"])
-        if mode == "set":
-            d.selection = ids
-        elif mode == "add":
-            d.selection |= ids
-        elif mode == "remove":
-            d.selection -= ids
-        elif mode == "clear":
+        if mode not in ("set", "add", "remove", "clear", "all"):
+            raise FakeError(400, "bad_param", param="mode", allowed=["set", "add", "remove", "clear", "all"])
+        types = body.get("type") or []
+        layers = body.get("layer") or []
+        types = [types] if isinstance(types, str) else types
+        layers = [layers] if isinstance(layers, str) else layers
+        for name in layers:
+            self._layer(d, name)
+        bbox = body.get("bbox")
+        has_ids = body.get("ids") is not None
+        has_filter = bool(types or layers or bbox)
+        if mode == "clear":
+            if has_ids or has_filter:
+                raise FakeError(400, "bad_param", "mode clear takes no ids or filters", param="mode")
             d.selection = set()
-        elif mode == "all":
-            d.selection = set(d.entities)
+            return {"ids": [], "count": 0}
+        if has_ids:
+            candidates = list(dict.fromkeys(body["ids"]))
+            unknown = [i for i in candidates if i not in d.entities]
+            if unknown:
+                raise FakeError(404, "unknown_entity", ids=unknown)
+        elif mode == "all" or has_filter:
+            candidates = list(d.entities)
+        else:
+            raise FakeError(400, "missing_param", "'ids' is required", param="ids")
+
+        def matches(e: dict) -> bool:
+            if types and e["type"] not in types:
+                return False
+            if layers and e["layer"] not in layers:
+                return False
+            if bbox:
+                x1, y1, x2, y2 = bbox
+                x1, x2 = min(x1, x2), max(x1, x2)
+                y1, y2 = min(y1, y2), max(y1, y2)
+                b = e.get("bbox")
+                if not b:
+                    return False
+                inside = b["min"][0] >= x1 and b["min"][1] >= y1 and b["max"][0] <= x2 and b["max"][1] <= y2
+                touches = not (b["max"][0] < x1 or b["min"][0] > x2 or b["max"][1] < y1 or b["min"][1] > y2)
+                return inside if body.get("bbox_mode") == "window" else touches
+            return True
+
+        targets = {i for i in candidates if matches(d.entities[i])}
+        if mode == "set":
+            d.selection = targets
+        elif mode == "remove":
+            d.selection -= targets
+        else:  # add, all
+            d.selection |= targets
         return {"ids": sorted(d.selection), "count": len(d.selection)}
 
     def h_measure(self, q, body):
@@ -988,6 +1054,9 @@ class FakeLibreCAD:
             return {"distance": 0.0, "nearest_point": [x1, y1]}
         if kind == "length":
             ids = self._live(d, need(body, "ids"))
+            no_length = [i for i in ids if d.entities[i]["type"] not in HAS_LENGTH]
+            if no_length:
+                raise FakeError(400, "bad_param", "some entities have no length", param="ids", ids=no_length)
             per = {str(i): d.entities[i].get("length", 0.0) for i in ids}
             return {"length": sum(per.values()), "per_entity": per}
         if kind == "area":

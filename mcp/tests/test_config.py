@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -37,7 +40,7 @@ def test_env_token_without_discovery_uses_the_default_url(monkeypatch):
 
 
 def test_os_default_discovery_file_needs_no_configuration():
-    p = put_default_discovery({"url": "http://127.0.0.1:13140", "token": "abc", "pid": 1})
+    p = put_default_discovery({"url": "http://127.0.0.1:13140", "token": "abc", "pid": os.getpid()})
     cfg = load_config()
     assert cfg.token == "abc" and cfg.base_url == "http://127.0.0.1:13140"
     assert cfg.token_source == "discovery file" and cfg.discovery_path == str(p)
@@ -116,3 +119,32 @@ def test_the_token_is_not_in_repr_or_describe(monkeypatch):
     cfg = load_config()
     assert "very-secret-token" not in repr(cfg)
     assert "very-secret-token" not in json.dumps(cfg.describe())
+
+
+def _dead_pid() -> int:
+    """The pid of a process that has ended."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def test_a_stale_discovery_file_is_never_used(monkeypatch):
+    # LibreCAD was killed: its file stays, with the token LibreCAD keeps for its next start.
+    # Another program may own the port now, so the token must not be sent anywhere.
+    p = put_default_discovery({"url": "http://127.0.0.1:13140", "token": "secret-token", "pid": _dead_pid()})
+    with pytest.raises(ConfigError) as exc:
+        load_config()
+    msg = str(exc.value)
+    assert "no longer running" in msg and str(p) in msg
+    assert "secret-token" not in msg
+
+
+def test_a_stale_discovery_file_only_lends_no_port(monkeypatch):
+    put_default_discovery({"url": "http://127.0.0.1:13999", "token": "from-file", "pid": _dead_pid()})
+    monkeypatch.setenv("LIBRECAD_API_TOKEN", "from-env")
+    assert load_config().base_url == DEFAULT_URL
+
+
+def test_a_discovery_file_without_pid_is_used():
+    put_default_discovery({"url": "http://127.0.0.1:13140", "token": "abc"})
+    assert load_config().token == "abc"

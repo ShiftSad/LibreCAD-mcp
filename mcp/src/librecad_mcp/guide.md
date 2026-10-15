@@ -18,8 +18,9 @@ No drawing open? `new_document` or `open_document`.
 | Topic | Rule |
 |---|---|
 | Coordinates | Drawing units (see `units` in `get_drawing_info`; often mm). Points are `[x, y]`. |
-| Angles | **Degrees**, counter-clockwise from +X, in every field named `*_deg`. |
-| Lineweights | Millimetres, one of the standard widths (0.25, 0.35, 0.5, ...; others are refused with the list in `allowed`), or `"ByLayer"`. |
+| Angles | **Degrees**, counter-clockwise from +X, in every field named `*_deg`. Exception: an ellipse's `start_angle_deg`/`end_angle_deg` are parametric angles measured from its `major_axis` (as DXF stores them), not polar angles from +X. |
+| Lineweights | Millimetres, one of the standard widths (0.25, 0.35, 0.5, ...; others are refused with the list in `allowed`), or `"ByLayer"`. Layers take a width or `"Default"`, never `"ByLayer"`/`"ByBlock"`. |
+| Linetypes | Any case on input (`"Dashed"`, `"DASHED"`); LibreCAD returns them in upper case (`"DASHED"`, `"CONTINUOUS"`). |
 | Colors | `"ByLayer"`, `"ByBlock"`, `"#rrggbb"`, or an AutoCAD color index 1..255 (1 red, 2 yellow, 3 green, 4 cyan, 5 blue, 6 magenta, 7 white/black). Layers take `#rrggbb` or an index. |
 | Pixel sizes | `*_px`. |
 | Drawing ids | `document_id` is the `id` from `list_documents` (LibreCAD counts from 0, so 0 is a real drawing). Omit it for the active drawing. |
@@ -45,7 +46,7 @@ All entities accept `layer`, `color`, `linetype` and `lineweight`. Without them 
 | `line` | `start`, `end` |
 | `circle` | `center`, `radius` > 0 |
 | `arc` | `center`, `radius` > 0, `start_angle_deg`, `end_angle_deg`, `reversed` (false: counter-clockwise from start to end) |
-| `ellipse` | `center`, `major_axis` (vector from the center), `ratio` in (0, 1], `start_angle_deg` (0), `end_angle_deg` (360), `reversed` |
+| `ellipse` | `center`, `major_axis` (vector from the center), `ratio` in (0, 1], `start_angle_deg` (0), `end_angle_deg` (360), `reversed`. The angles are parametric, from the major axis: the point at t is center + major_axis·cos t + minor_axis·sin t |
 | `point` | `position` |
 | `polyline` | `vertices`: `[x, y]` or `[x, y, bulge]` (at least 2), `closed` (false). bulge = tan(arc angle / 4), + counter-clockwise |
 | `spline` | either `control_points` (at least degree + 1) and `degree` (3; 1..3), or `fit_points` (at least 2); `closed` |
@@ -53,7 +54,7 @@ All entities accept `layer`, `color`, `linetype` and `lineweight`. Without them 
 | `mtext` | `position`, `text` (`\P` = new line), `height`, `width` (0 = no wrap), `angle_deg`, `attachment` (top_left ... bottom_right), `line_spacing` (1), `style` |
 | `dimension` | `dim_type` `linear`: `p1`, `p2`, `line_point`, `angle_deg` (0 horizontal, 90 vertical); `aligned`: `p1`, `p2`, `line_point`; `radial`: `center`, `point`, `leader_length`; `diametric`: `point`, `opposite_point`; `angular`: `line1`, `line2` (each two points), `arc_point`. All: `text` ("" = measured value), `style` |
 | `hatch` | `pattern` ("SOLID", or e.g. "ANSI31"), `scale` (1), `angle_deg` (0), and either `boundary` (loops of points, or `{vertices, closed}`) or `boundary_ids` (ids of closed entities) |
-| `insert` | `block`, `position`, `scale` (1 or `[sx, sy]`), `angle_deg`, `columns`, `rows`, `spacing` |
+| `insert` | `block`, `position`, `scale` (1 or `[sx, sy]`; a negative factor mirrors, zero is refused), `angle_deg`, `columns`, `rows`, `spacing` |
 
 `add_entities` is atomic: if one spec is wrong, nothing is created, and the reply's `errors` names
 each bad field (`entities[2].radius`); `allowed` gives the accepted values of a field when
@@ -73,11 +74,20 @@ Read-only types you may meet in `query_entities`: `image`, `leader`, `mleader`, 
 - **Edit**: `query_entities` to find ids, then `update_entity`, `transform_entities` (move,
   rotate, scale, mirror, optionally as copies) or `delete_entities`; `undo` if it went wrong.
 - **Convert**: `open_document`, `export_document` (DXF R12..2018, DWG 2000..2018, where 2018
-  means the AutoCAD 2018-2026 format AC1032; PDF, PNG, SVG), `close_document`.
+  means the AutoCAD 2018-2026 format AC1032; PDF, PNG, SVG), `close_document` (unless
+  `open_document` answered `already_open: true`: that drawing was the user's, leave it open).
+- **Select**: `select_entities` combines `entity_ids` and the filters (types, layers, area): an
+  entity must match every one given. `set`/`add`/`remove` need ids or a filter.
 - **Command line**: `run_command` types LibreCAD commands, such as `"line"` with inputs
-  `["0,0", "@100,0", "escape"]`. `list_commands` lists the main names only (`line2p` for that
-  line); aliases such as `line`, `li` or `l` work too. Prefer the dedicated tools; they are
-  atomic and report ids.
+  `["0,0", "@100,0", "escape", "escape"]`: one `"escape"` ends the segment chain, the second
+  leaves the line tool (check that `active_action` is null in the reply). `list_commands` lists
+  the main names only (`line2p` for that line); aliases such as `line`, `li` or `l` work too.
+  Prefer the dedicated tools; they are atomic and report ids.
+- **Measure**: `length` is for curves (lines, arcs, circles, ellipses, polylines, splines);
+  `area` for closed entities and hatches.
+- **Transform**: `scale` with `[fx, fy]` (fx != fy) is refused for text, mtext, polylines with
+  arcs, hatches with curved edges and radial or diametric dimensions, which cannot follow it;
+  factors must be > 0 (use `mirror` to flip).
 
 ## Errors
 

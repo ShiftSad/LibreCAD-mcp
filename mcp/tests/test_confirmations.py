@@ -172,3 +172,34 @@ async def test_a_refused_path_is_never_asked_about(fake, doc):
     asker = Asker()
     out = await call("save_document_as", {"path": "relative.dxf", "overwrite": True}, asker=asker)
     assert out["error"] == "blocked_by_local_policy" and asker.questions == []
+
+
+# --- a layer name in another Unicode spelling is the same layer ------------------------------------
+
+NFC = "Caf" + chr(0xE9)     # how the layer was created
+NFD = "Cafe" + chr(0x301)    # the same name, decomposed: LibreCAD finds the same layer
+
+
+async def test_delete_layer_asks_for_any_spelling_of_the_name(fake, doc):
+    await _layer_with_entities(fake, name=NFC)
+    out = await srv.delete_layer(NFD, entities="delete")
+    assert out["error"] == "confirmation_required"
+    assert NFC in doc.layers and requests(fake, "DELETE") == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_delete_layer_prompts_for_any_spelling_and_deletes_the_listed_layer(fake, doc, mode):
+    await _layer_with_entities(fake, name=NFC)
+    asker = Asker()
+    out = await call("delete_layer", {"name": NFD, "entities": "delete"}, mode, asker)
+    assert asker.questions == [f"Delete layer '{NFC}' and delete 2 entities on it? Deleting a layer cannot be "
+                               "undone in LibreCAD."]
+    assert out["deleted"] == NFC
+    from urllib.parse import quote
+    assert [c["path"] for c in requests(fake, "DELETE")] == ["/api/v1/layers/" + quote(NFC, safe="")]
+
+
+async def test_delete_layer_of_an_unknown_name_deletes_nothing(fake, doc):
+    out = await srv.delete_layer("nope", user_confirmed=True)
+    assert out["error"] == "unknown_layer" and out["name"] == "nope"
+    assert requests(fake, "DELETE") == []

@@ -37,6 +37,8 @@ async def test_prompts():
     assert "a 10 m x 5 m room" in draw_text and "add_entities" in draw_text and "render_view" in draw_text
     convert_text = convert.messages[0].content.text
     assert all(t in convert_text for t in ("open_document", "export_document", "close_document", "R12"))
+    # a drawing the user had open already is not closed under them
+    assert "already_open" in convert_text
     assert "get_drawing_info" in inspect_.messages[0].content.text
 
 

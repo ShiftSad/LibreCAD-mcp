@@ -24,7 +24,7 @@ FORMAT_EXTENSIONS = {"dxf": ".dxf", "dwg": ".dwg", "pdf": ".pdf", "png": ".png",
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
-_WINDOWS_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+_WINDOWS_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", *(f"COM{i}" for i in range(1, 10)),
                          *(f"LPT{i}" for i in range(1, 10))}
 
 PathKind = Literal["open", "save", "export"]
@@ -66,6 +66,10 @@ class BlockedByPolicy(ApiError):
             self.body["path"] = path
 
 
+def _is_control(ch: str) -> bool:
+    return ord(ch) < 0x20 or ord(ch) == 0x7F
+
+
 def _is_network(p: str, windows: bool) -> bool:
     if windows:
         return p.startswith(("\\\\", "//", "\\/", "/\\"))
@@ -87,9 +91,15 @@ def check_path(path: str, kind: PathKind, fmt: str | None = None, *, windows: bo
     if not isinstance(path, str) or not path.strip():
         raise BlockedByPolicy("bad_path", "the path is empty", "Pass an absolute file path.")
     p = path.strip()
-    if p.startswith("${") or "\x00" in p:
+    if p.startswith("${"):
         raise BlockedByPolicy("bad_path", "the path is not a usable file path",
                               "Pass an absolute file path.", path)
+    if any(_is_control(ch) for ch in p):
+        # A NUL would cut the name the system opens; no control character belongs in a file name.
+        # LibreCAD refuses these paths too (400 bad_path).
+        raise BlockedByPolicy("bad_path", "the path contains a control character",
+                              "Pass an absolute file path without control characters.",
+                              "".join("�" if _is_control(ch) else ch for ch in p))
     if p.startswith("~"):
         raise BlockedByPolicy("bad_path", "'~' is not expanded on the LibreCAD side",
                               "Pass the full absolute path, for example from the user's home folder.", path)

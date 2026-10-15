@@ -3,18 +3,29 @@
 
 Field names are exactly the Remote API's (DESIGN.md section 2.6): what a tool sends is what
 LibreCAD reads, and what query_entities returns uses the same names. Coordinates are drawing
-units, angles are degrees (counter-clockwise from +X), lineweights are millimetres.
+units, angles are degrees (counter-clockwise from +X; the start and end angles of an elliptic arc
+are measured from its major axis instead), lineweights are millimetres.
 """
 from __future__ import annotations
 
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 # --- scalar and point types -----------------------------------------------------------------
 
 Num = Annotated[float, Field(allow_inf_nan=False)]
 PositiveNum = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+
+
+def _not_zero(v: float) -> float:
+    if v == 0:
+        raise ValueError("must not be zero")
+    return v
+
+
+# A scale factor of a block reference: negative mirrors it (a normal CAD operation), zero is refused.
+NonZeroNum = Annotated[float, Field(allow_inf_nan=False), AfterValidator(_not_zero)]
 Point = Annotated[list[Num], Field(min_length=2, max_length=2)]
 Vertex = Annotated[list[Num], Field(
     min_length=2, max_length=3,
@@ -29,13 +40,13 @@ LayerColor = Union[
     Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$", description='"#rrggbb"')],
     Annotated[int, Field(ge=1, le=255, description="AutoCAD color index (ACI) 1..255")],
 ]
-Lineweight = Union[
-    Literal["ByLayer", "ByBlock", "Default"],
-    Annotated[float, Field(ge=0, le=2.11, allow_inf_nan=False,
-                           description="Millimetres, one of the standard widths (0.00, 0.05, 0.09, "
-                                       "0.13, 0.15, 0.18, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.53, "
-                                       "0.60, 0.70, 0.80, 0.90, 1.00, 1.06, 1.20, 1.40, 1.58, 2.00, 2.11)")],
-]
+_WIDTHS_MM = Annotated[float, Field(ge=0, le=2.11, allow_inf_nan=False,
+                                    description="Millimetres, one of the standard widths (0.00, 0.05, 0.09, "
+                                                "0.13, 0.15, 0.18, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.53, "
+                                                "0.60, 0.70, 0.80, 0.90, 1.00, 1.06, 1.20, 1.40, 1.58, 2.00, 2.11)")]
+Lineweight = Union[Literal["ByLayer", "ByBlock", "Default"], _WIDTHS_MM]
+# A layer's own lineweight: LibreCAD refuses ByLayer and ByBlock for layers.
+LayerLineweight = Union[Literal["Default"], _WIDTHS_MM]
 
 EntityTypeName = Literal["line", "circle", "arc", "ellipse", "point", "polyline", "spline", "text",
                          "mtext", "dimension", "hatch", "insert", "image", "leader", "mleader",
@@ -52,11 +63,15 @@ _LAYER_NAME = Field(description="Layer name, exactly as list_layers shows it (ca
 _LAYER_COLOR = Field(description='Layer color: "#rrggbb" or an AutoCAD color index 1..255 (1 red, '
                                  '2 yellow, 3 green, 4 cyan, 5 blue, 6 magenta, 7 white/black, 8 grey).')
 _COLOR = Field(description='Entity color: "ByLayer", "ByBlock", "#rrggbb" or an AutoCAD color index 1..255.')
-_LINETYPE = Field(description='Linetype name, e.g. "Continuous", "Dashed", "DashDot", "Center", '
-                              '"Hidden", "Dot", or "ByLayer"/"ByBlock" for entities.')
+_LINETYPE = Field(description='Linetype name, e.g. "CONTINUOUS", "DASHED", "DASHDOT", "CENTER", '
+                              '"HIDDEN", "DOT" (any case on input; LibreCAD returns them in upper case), '
+                              'or "ByLayer"/"ByBlock" for entities.')
 _LINEWEIGHT_MM = Field(description='Lineweight in millimetres, one of the standard widths (0.25, 0.35, '
                                    '0.5, ...; other values are refused with the list), or '
                                    '"ByLayer"/"ByBlock"/"Default".')
+_LAYER_LINEWEIGHT_MM = Field(description='Layer lineweight in millimetres, one of the standard widths '
+                                         '(0.25, 0.35, 0.5, ...; other values are refused with the list), '
+                                         'or "Default". Layers take neither "ByLayer" nor "ByBlock".')
 _TYPES = Field(description="Only these entity types (any of them).")
 _LAYERS = Field(description="Only entities on these layers (any of them); exact names.")
 _BBOX_MIN = Field(description="Lower-left corner [x, y] of an area filter; give bbox_max too.")
@@ -126,7 +141,9 @@ class ArcSpec(_Attrs):
 
 class EllipseSpec(_Attrs):
     """An ellipse or elliptic arc. major_axis is the vector from the center to the end of the major
-    axis; ratio is minor/major in (0, 1]."""
+    axis; ratio is minor/major in (0, 1]. start_angle_deg and end_angle_deg are parametric angles
+    (as DXF stores them), counter-clockwise from major_axis, not polar angles from +X: the point at
+    t is center + major_axis*cos(t) + minor_axis*sin(t). 0 and 360 make a full ellipse."""
     type: Literal["ellipse"]
     center: Point
     major_axis: Point
@@ -288,7 +305,8 @@ class InsertSpec(_Attrs):
     type: Literal["insert"]
     block: Annotated[str, Field(min_length=1)]
     position: Point
-    scale: Union[PositiveNum, Annotated[list[PositiveNum], Field(min_length=2, max_length=2)]] = 1.0
+    scale: Union[NonZeroNum, Annotated[list[NonZeroNum], Field(min_length=2, max_length=2)]] = Field(
+        1.0, description="Uniform scale or [sx, sy]; a negative factor mirrors the block, zero is refused.")
     angle_deg: Num = 0.0
     columns: Annotated[int, Field(ge=1, le=1000)] = 1
     rows: Annotated[int, Field(ge=1, le=1000)] = 1

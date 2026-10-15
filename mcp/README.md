@@ -34,18 +34,22 @@ live API route list), and the prompts `draw-from-description`, `inspect-drawing`
 
 1. **LibreCAD-mcp**, a LibreCAD build with the Remote API, from
    [the fork's releases](https://github.com/ShiftSad/LibreCAD-mcp/releases).
-2. **[uv](https://docs.astral.sh/uv/)**, which supplies the `uvx` command that runs this server.
+2. **[uv](https://docs.astral.sh/uv/)**, which runs this server (`uv run` / `uvx`).
    - Windows (PowerShell): `irm https://astral.sh/uv/install.ps1 | iex`
    - macOS and Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-3. **git**: uv fetches this server from the fork's repository (it is not on PyPI).
+3. **The server itself**: the Claude Desktop extension carries it. For other clients, use a
+   checkout of the fork (`git clone https://github.com/ShiftSad/LibreCAD-mcp`), or, once a release
+   is published, let uv fetch it from git at the release tag (then git must be installed). It is
+   not on PyPI.
 
 ## Quickstart
 
 ### 1. Enable the Remote API in LibreCAD
 
 In LibreCAD-mcp, open **Options > Application Preferences > Remote API (MCP)** and tick
-**Enable Remote API**. Click OK. The status line in that tab should read
-"Listening on 127.0.0.1:13140".
+**Enable Remote API**. Click OK. The command line then shows
+`[MCP] Remote API listening on 127.0.0.1:13140` (with "Show API activity" on, the default); the
+status line of the tab shows the same when you open Preferences again.
 
 That is all the setup this server needs on the same computer. While the API is on, LibreCAD writes
 a small discovery file with the address and the token, readable by your user account only, and
@@ -58,17 +62,17 @@ Download `librecad-mcp-<version>.mcpb` from the
 (or drag it into Settings > Extensions). Leave the settings blank. Don't hand-edit
 `claude_desktop_config.json`: the extension takes care of starting the server.
 
-The first start downloads the server from git, which can take a minute. To do that ahead of time,
-run once in a terminal:
-
-```sh
-uvx --from "git+https://github.com/ShiftSad/LibreCAD-mcp@v2.2.2.6-mcp.1#subdirectory=mcp" librecad-mcp --version
-```
+The extension carries the server; uv downloads its Python dependencies on the first start, which
+can take a minute. To run the server of a checkout instead, set `LIBRECAD_MCP_SOURCE` to its `mcp`
+folder in the environment Claude Desktop starts with.
 
 ### 3. Claude Code (or any MCP client with a JSON config)
 
+From a checkout of the fork (this works today, before any release is published; use your
+checkout's path):
+
 ```sh
-claude mcp add librecad -- uvx --from "git+https://github.com/ShiftSad/LibreCAD-mcp@v2.2.2.6-mcp.1#subdirectory=mcp" librecad-mcp
+claude mcp add librecad -- uv run --frozen --directory C:/path/to/LibreCAD-mcp/mcp librecad-mcp
 ```
 
 or in a project's `.mcp.json`:
@@ -77,28 +81,41 @@ or in a project's `.mcp.json`:
 {
   "mcpServers": {
     "librecad": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/ShiftSad/LibreCAD-mcp@v2.2.2.6-mcp.1#subdirectory=mcp", "librecad-mcp"],
+      "command": "uv",
+      "args": ["run", "--frozen", "--directory", "C:/path/to/LibreCAD-mcp/mcp", "librecad-mcp"],
       "env": {}
     }
   }
 }
 ```
 
-`env` stays empty: the token comes from the discovery file. The **Copy MCP config** button in
-LibreCAD's Remote API tab copies a ready snippet.
+Once a release is published, the server can also run straight from git at its tag, without a
+checkout:
+
+```sh
+claude mcp add librecad -- uvx --from "git+https://github.com/ShiftSad/LibreCAD-mcp@v2.2.2.6-mcp.1#subdirectory=mcp" librecad-mcp
+```
+
+(in `.mcp.json`: `"command": "uvx", "args": ["--from", "git+...@<tag>#subdirectory=mcp",
+"librecad-mcp"]`).
+
+`env` stays empty: the address and the token come from the discovery file, so the entry keeps
+working after a new token or port and holds no secret. The **Copy MCP config** button in
+LibreCAD's Remote API tab copies a ready snippet: the checkout form for a build of a checkout,
+the release-tag form for a release build.
 
 Then ask, for example: *"Draw a 4 m x 3 m room plan with 150 mm walls on a layer 'walls', add the
 dimensions, and show me."*
 
 ### 4. Windows fallback: a plain virtual environment
 
-If `uvx` fails on Windows (for example with a sharing violation while installing a dependency), use
-a normal virtual environment, which retries:
+If `uv` fails on Windows (for example with a sharing violation while installing a dependency), use
+a normal virtual environment, which retries; install from your checkout's `mcp` folder (or, once a
+release is published, from `git+https://github.com/ShiftSad/LibreCAD-mcp@v2.2.2.6-mcp.1#subdirectory=mcp`):
 
 ```powershell
 py -m venv "$env:USERPROFILE\.librecad-mcp"
-& "$env:USERPROFILE\.librecad-mcp\Scripts\pip" install "git+https://github.com/ShiftSad/LibreCAD-mcp@v2.2.2.6-mcp.1#subdirectory=mcp"
+& "$env:USERPROFILE\.librecad-mcp\Scripts\pip" install "C:\path\to\LibreCAD-mcp\mcp"
 ```
 
 and use `%USERPROFILE%\.librecad-mcp\Scripts\librecad-mcp.exe` as the command, without arguments.
@@ -109,10 +126,10 @@ Nothing is needed when LibreCAD runs on the same computer. Optional environment 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LIBRECAD_API_URL` | from the discovery file, else `http://127.0.0.1:13140` | Remote API address |
+| `LIBRECAD_API_URL` | from the discovery file, else `http://127.0.0.1:13140` | Remote API address; leave it unset, or it overrides the port LibreCAD writes to the discovery file |
 | `LIBRECAD_API_TOKEN` | from the discovery file | Remote API token |
 | `LIBRECAD_API_DISCOVERY` | the OS default below | Path of `remote-api.json` |
-| `LIBRECAD_API_TIMEOUT` | `30` | Seconds to wait on ordinary calls; open, save, export and new wait 50 s |
+| `LIBRECAD_API_TIMEOUT` | `30` | Seconds to wait on ordinary calls; open, save, export and new wait 50 s. LibreCAD is told (`X-Request-Timeout-Ms`), so it answers `ui_timeout` itself and never runs a request after this server stopped waiting |
 | `LIBRECAD_MCP_ALLOWED_ROOTS` | unset (any local path) | Folders this server may open files from or write to, separated by `;` on Windows and `:` elsewhere |
 | `LIBRECAD_MCP_ALLOW_NETWORK_PATHS` | `0` | `1` allows UNC and other network paths |
 
@@ -124,13 +141,16 @@ way). The settings are read on every tool call, so a new token in LibreCAD is pi
 | OS | Location |
 |---|---|
 | Windows | `%APPDATA%\LibreCAD\LibreCAD-2\remote-api.json` |
-| Linux | `~/.local/share/LibreCAD/LibreCAD-2/remote-api.json` (`$XDG_DATA_HOME` when set) |
+| Linux | `~/.local/share/LibreCAD/LibreCAD-2/remote-api.json` (`$XDG_DATA_HOME` when set); for the snap, `~/snap/librecad-mcp/current/.local/share/LibreCAD/LibreCAD-2/remote-api.json` |
 | macOS | `~/Library/Application Support/LibreCAD/LibreCAD-2/remote-api.json` |
+
+A discovery file whose `pid` no longer runs (LibreCAD crashed or was killed and left it behind) is
+never used: its token is not sent anywhere, since another program may have taken the port.
 
 ## Conventions
 
 - **Units**: coordinates are drawing units (`get_drawing_info` reports them, often mm). Points are `[x, y]`.
-- **Angles are degrees** everywhere (`*_deg`), counter-clockwise from +X. Lineweights are millimetres. Pixel sizes end in `_px`.
+- **Angles are degrees** everywhere (`*_deg`), counter-clockwise from +X; an elliptic arc's start and end angles are parametric angles measured from its major axis, as in DXF. Lineweights are millimetres. Pixel sizes end in `_px`. Linetype names are read in any case and come back in upper case (`"DASHED"`).
 - **Ids**: each entity has an `id` that stays the same when it is edited, moved or undone; copies get new ids. Drawings have their own ids (`document_id`); omitted, a tool acts on the active drawing.
 - **Undo**: one tool call that changes entities is one undo step, like Ctrl+Z in LibreCAD, and shares the history with your own edits.
 - **Layer changes are not undoable** in LibreCAD (create, rename, restyle, delete). Replies say `"undoable": false`.
@@ -160,13 +180,15 @@ way). The settings are read on every tool call, so a new token in LibreCAD is pi
 | Symptom | What to do |
 |---|---|
 | `LibreCAD not reachable: no Remote API discovery file ...` | LibreCAD-mcp is not running, or the Remote API is not enabled. Start it and tick Enable in Preferences > Remote API (MCP). |
-| `LibreCAD not reachable at http://127.0.0.1:13140 ...` | LibreCAD closed or crashed after writing the discovery file, or another port is in use: start LibreCAD again and check the status line in the Remote API tab. |
+| `LibreCAD not reachable: the Remote API discovery file ... was left by a LibreCAD that is no longer running` | LibreCAD crashed or was killed. Start it again; it rewrites the file. |
+| `LibreCAD not reachable at http://127.0.0.1:13140 ...` | LibreCAD is not answering on the port in its discovery file (`LIBRECAD_API_URL` set to another port?): check the status line in the Remote API tab. |
 | `unauthorized (check the token ...)` | The token changed (Regenerate in Preferences) while `LIBRECAD_API_TOKEN` or the extension's token setting still holds the old one. Clear that setting to use the discovery file. |
 | Status "Port 13140 is in use" in Preferences | Another LibreCAD (or another program) holds the port. Close it, or pick another port; the discovery file follows. |
 | `gui_modal_open` | A dialog is open in LibreCAD. Close it and ask again. |
-| `ui_timeout` or `timed_out` | LibreCAD was busy (a large file, a long export). Check with `list_documents` before retrying: the work may have finished. |
+| `ui_timeout` or `timed_out` | LibreCAD was busy (a large file, a long export). With `started: false` nothing was done; otherwise check with `list_documents` before retrying: the work may have finished. |
+| `server_busy` | More than 16 connections to LibreCAD at once. Retry in a moment. |
 | `blocked_by_local_policy` | This server refused a file path; `reason` and `hint` say why. |
-| First start in Claude Desktop times out | uv was still downloading the server; run the `uvx ... --version` command from the quickstart once. |
+| First start in Claude Desktop times out | uv was still downloading the server's dependencies; reload the extension after a minute. |
 
 ## Development
 
@@ -182,8 +204,11 @@ uv run librecad-mcp --version
 - `config.py`, `discovery.py`: where the API is; `guard.py`: path rules and confirmations.
 - `fields.py`: the entity spec models (the same field names as the HTTP API).
 - `tests/fake_librecad.py`: an in-memory fake of the API used by the tests.
-- `scripts/cut-release.sh <version> <tag>`: bumps versions, pins the tag, runs the tests and packs
-  the `.mcpb`. `scripts/make_icon.py` redraws the extension icon.
+- `scripts/cut-release.sh <version> <tag>`: checks that the tag is this build's (`LC_VERSION`,
+  `LC_MCP_RELEASE`), bumps versions, pins the tag everywhere (the docs included), runs the tests and
+  packs the `.mcpb` with the server inside. `scripts/check-release.sh <tag>`, after pushing the tag:
+  the release gate (the tag is published and uvx runs from it). `scripts/make_icon.py` redraws the
+  extension icon.
 
 The HTTP contract is described in `docs/remote-api/` at the repository root.
 
@@ -210,17 +235,21 @@ GPL-2.0-or-later, the same as LibreCAD (see [LICENSE](LICENSE)). Support through
 1. Instale o **LibreCAD-mcp** (a versão do LibreCAD com a Remote API, na
    [página de releases](https://github.com/ShiftSad/LibreCAD-mcp/releases)) e o
    **[uv](https://docs.astral.sh/uv/)**. No Windows: `irm https://astral.sh/uv/install.ps1 | iex`.
-   O git também precisa estar instalado.
 2. No LibreCAD, abra **Options > Application Preferences > Remote API (MCP)**, marque
-   **Enable Remote API** e clique em OK. A API escuta só em `127.0.0.1` e exige um token; o
-   LibreCAD grava um arquivo de descoberta que este servidor lê sozinho, então não é preciso
-   copiar nada.
-3. **Claude Desktop**: abra o arquivo `librecad-mcp-<versão>.mcpb` da página de releases e deixe
-   as configurações em branco. **Claude Code**:
+   **Enable Remote API** e clique em OK. A linha de comando mostra
+   `[MCP] Remote API listening on 127.0.0.1:13140` (reabra as Preferências para ver o status). A
+   API escuta só em `127.0.0.1` e exige um token; o LibreCAD grava um arquivo de descoberta que
+   este servidor lê sozinho, então não é preciso copiar nada.
+3. **Claude Desktop**: abra o arquivo `librecad-mcp-<versão>.mcpb` da página de releases (ele já
+   traz o servidor) e deixe as configurações em branco. **Claude Code**, a partir de um clone do
+   fork (funciona antes de qualquer release; use o caminho do seu clone):
 
    ```sh
-   claude mcp add librecad -- uvx --from "git+https://github.com/ShiftSad/LibreCAD-mcp@v2.2.2.6-mcp.1#subdirectory=mcp" librecad-mcp
+   claude mcp add librecad -- uv run --frozen --directory C:/caminho/para/LibreCAD-mcp/mcp librecad-mcp
    ```
+
+   Depois que uma release for publicada, também funciona direto do git:
+   `uvx --from "git+https://github.com/ShiftSad/LibreCAD-mcp@v2.2.2.6-mcp.1#subdirectory=mcp" librecad-mcp`.
 
 4. Peça, por exemplo: *"Desenhe a planta de um quarto de 4 m x 3 m com paredes de 150 mm na camada
    'paredes', cote e me mostre."*

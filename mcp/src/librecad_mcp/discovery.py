@@ -39,7 +39,61 @@ def default_paths(platform: str | None = None, env: Mapping[str, str] | None = N
         xdg = (env.get("XDG_DATA_HOME") or "").strip()
         # The XDG spec ignores a relative XDG_DATA_HOME, and so does Qt.
         base = Path(xdg) if xdg.startswith("/") else home / ".local" / "share"
+        paths = [base / _ORGANIZATION / _APPLICATION / DISCOVERY_FILE_NAME]
+        # A snap's HOME is ~/snap/<name>/<revision>: its file lands there (newest first).
+        snaps = sorted((home / "snap").glob(f"librecad*/current/.local/share/{_ORGANIZATION}/{_APPLICATION}/"
+                                            f"{DISCOVERY_FILE_NAME}"),
+                       key=_mtime, reverse=True)
+        return paths + [p for p in snaps if p not in paths]
     return [base / _ORGANIZATION / _APPLICATION / DISCOVERY_FILE_NAME]
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def pid_alive(pid: object) -> bool:
+    """Whether a process with this id runs on this machine. True when it cannot be told (no
+    usable pid, or no permission to look), so only a file that is surely stale is passed over."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return True
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            # ERROR_INVALID_PARAMETER: no such process; anything else (access denied): it exists
+            return ctypes.get_last_error() != 87
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def is_stale(data: dict) -> bool:
+    """True when the discovery file names a LibreCAD process that no longer runs: LibreCAD was
+    killed or crashed and left the file behind. Its token must not be sent anywhere, since another
+    program may now listen on that port (and LibreCAD keeps the token for its next start)."""
+    return not pid_alive(data.get("pid"))
 
 
 def read_discovery(path: str | os.PathLike) -> dict | None:
