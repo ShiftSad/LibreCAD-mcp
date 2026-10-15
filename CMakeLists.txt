@@ -2223,6 +2223,13 @@ set (SHARED_SOURCES
      librecad/src/lib/actions/options/lc_property_sheet_interface.h
 )
 
+# librecad-mcp: in-app Remote API (librecad/src/remote_api), built into
+# librecad_lib. The fragment also sets LC_REMOTE_API_DEFINES and
+# LC_REMOTE_API_TEST_SOURCES for the targets below.
+include("${CMAKE_CURRENT_SOURCE_DIR}/librecad/src/remote_api/remote_api.cmake")
+list(APPEND SHARED_SOURCES ${LC_REMOTE_API_SOURCES})
+list(APPEND SHARED_INCLUDES ${LC_REMOTE_API_INCLUDES})
+
 set (MUPARSER_SOURCES
      libraries/muparser/include/muParser.h
      libraries/muparser/include/muParserBase.h
@@ -2267,6 +2274,8 @@ qt_add_library (librecad_lib STATIC
 target_compile_definitions (librecad_lib PRIVATE
                             DWGSUPPORT
 )
+# librecad-mcp: LC_MCP_RELEASE and the LC_REMOTE_API_HAS_* component macros
+target_compile_definitions (librecad_lib PRIVATE ${LC_REMOTE_API_DEFINES})
 target_include_directories(librecad_lib PRIVATE
     ${SHARED_INCLUDES}
 )
@@ -2374,6 +2383,8 @@ target_include_directories (librecad PRIVATE
 target_compile_definitions(librecad PRIVATE
     DWGSUPPORT
 )
+# librecad-mcp: LC_MCP_RELEASE and the LC_REMOTE_API_HAS_* component macros
+target_compile_definitions(librecad PRIVATE ${LC_REMOTE_API_DEFINES})
 target_link_libraries (librecad PRIVATE
                        librecad_lib
                        Qt6::Core Qt6::Widgets Qt6::Gui Qt6::PrintSupport Qt6::Svg Qt6::Network
@@ -2533,6 +2544,11 @@ option (LIBRECAD_REGISTER_CROSS_READ_SMOKE
         "Register the cross-reader DWG fixture smoke test with CTest" OFF)
 option (LIBRECAD_REGISTER_TEXT_FOUNDATION_TESTS
         "Register headless text/source-state foundation tests with CTest" OFF)
+# librecad-mcp: register librecad_remote_api_tests with CTest. The target is not
+# built by default (EXCLUDE_FROM_ALL), so a plain ctest after a default build
+# must not list it; the remote-api CI job turns this on.
+option (LIBRECAD_REGISTER_REMOTE_API_TESTS
+        "Register librecad_remote_api_tests with CTest (build that target first)" OFF)
 
 if (BUILD_TESTS)
     enable_testing()
@@ -3154,6 +3170,47 @@ if (BUILD_TESTS)
         LIBRECAD_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
         LIBRECAD_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/librecad/src/lib/filters/tests/testdata"
     )
+
+    # librecad-mcp: tests of the in-app Remote API. Each component fragment of
+    # librecad/src/remote_api appends its tests to LC_REMOTE_API_TEST_SOURCES.
+    qt_add_executable(librecad_remote_api_tests
+        EXCLUDE_FROM_ALL
+        ${MAIN_SOURCES}
+        ${LIBRECAD_TEST_SETTINGS_ISOLATION_SOURCE}
+        ${LIBRECAD_TEST_TEMP_DIRECTORY_SOURCE}
+        ${LC_REMOTE_API_TEST_SOURCES}
+    )
+    target_include_directories(librecad_remote_api_tests PRIVATE ${SHARED_INCLUDES})
+    target_link_libraries(librecad_remote_api_tests PRIVATE
+                           librecad_lib
+                           Catch2::Catch2WithMain
+                           Qt6::Core
+                           Qt6::Gui
+                           Qt6::Network
+                           Qt6::PrintSupport
+                           Qt6::Svg
+                           Qt6::Widgets
+    )
+    target_compile_features(librecad_remote_api_tests PRIVATE cxx_std_17)
+    if (MSVC)
+        target_compile_options(librecad_remote_api_tests PRIVATE /bigobj)
+    endif ()
+    target_compile_definitions(librecad_remote_api_tests PRIVATE
+        BUILD_TESTS=1
+        DWGSUPPORT
+        _USE_MATH_DEFINES
+        LIBRECAD_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+        LIBRECAD_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/librecad/src/lib/filters/tests/testdata"
+        ${LC_REMOTE_API_DEFINES}
+    )
+    if (LC_REMOTE_API_TEST_SOURCES AND LIBRECAD_REGISTER_REMOTE_API_TESTS) # librecad-mcp: opt-in, the target is EXCLUDE_FROM_ALL
+        add_test(NAME librecad_remote_api_tests
+            COMMAND $<TARGET_FILE:librecad_remote_api_tests> --reporter compact)
+        set_tests_properties(librecad_remote_api_tests PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            TIMEOUT 300)
+    endif ()
 
     # Keep per-format micro lanes for implementation work. They share the
     # already-built library and Catch2 runtime, and compile only the test

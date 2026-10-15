@@ -63,6 +63,7 @@ class LC_QTStatusbarManager;
 class LC_QuickInfoWidget;
 class LC_RelZeroCoordinatesWidget;
 class LC_ReleaseChecker;
+class LC_RemoteApiController; // librecad-mcp: in-app Remote API
 class LC_SnapManager;
 class LC_UCSListWidget;
 class LC_UCSStateWidget;
@@ -370,6 +371,8 @@ public:
     int maybeSurfaceBlocksDock(RS_Graphic *graphic);
     LC_ActionGroup* getActionGroup(const QString& groupName) const;
     LC_ActionContext* getActionContext() const;
+    // librecad-mcp: the in-app Remote API; null until initCompleted()
+    LC_RemoteApiController* remoteApi() const { return m_remoteApi.get(); }
 
 protected:
     friend struct LC_DockLayoutTestAccess;
@@ -432,6 +435,7 @@ protected:
     std::unique_ptr<LC_ActionFactory> m_actionFactory;
     std::unique_ptr<LC_MenuFactory> m_menuFactory;
     std::unique_ptr<LC_ReleaseChecker> m_releaseChecker;
+    std::unique_ptr<LC_RemoteApiController> m_remoteApi; // librecad-mcp: in-app Remote API
     std::unique_ptr<LC_LastOpenFilesOpener> m_lastFilesOpener;
     LC_DefaultActionContext* m_actionContext{nullptr};
     LC_ActionOptionsManager* m_actionOptionsManager{nullptr};
@@ -531,6 +535,7 @@ protected:
     friend class LC_MenuFactory;
     friend class LC_ToolbarFactory;
     friend class LC_ApplicationWindowInitializer;
+    friend class LC_RemoteApiAppAccess; // librecad-mcp: dialog-free document operations of the Remote API
 };
 
 #ifdef _WINDOWS

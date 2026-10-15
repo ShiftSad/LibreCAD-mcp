@@ -23,6 +23,8 @@
 #ifndef LC_DOCUMENTSSTORAGE_H
 #define LC_DOCUMENTSSTORAGE_H
 
+#include <functional>
+
 #include <QObject>
 
 #include "lc_filedialogservice.h"
@@ -42,8 +44,10 @@ public:
     bool autoSaveDocument(RS_Document *document,RS_GraphicView * graphicView, QString& autosaveFileName);
     bool saveDocumentAs(const RS_Document *document,RS_GraphicView * graphicView, bool &cancelled);
     bool exportGraphics(RS_Graphic *graphic,const QString &fileName, RS2::FormatType formatType);
+    // librecad-mcp: onImportError (see RS_FileIO::fileImport) replaces the import error boxes
     bool loadDocument(const RS_Document *document, const QString &fileName, RS2::FormatType type,
-                      RS2::DxfTextEncoding encoding = RS2::DxfTextEncoding::Declared) const;
+                      RS2::DxfTextEncoding encoding = RS2::DxfTextEncoding::Declared,
+                      std::function<bool(bool, const QString&)> onImportError = nullptr) const;
     bool loadDocument(const RS_Document *document, const QString &fileName) const;
     bool loadDocumentFromTemplate(const RS_Document *document, const RS_GraphicView *graphicView, const QString &fileName, RS2::FormatType type) const;
     QString createAutoSaveFileName(const QFileInfo &fileInfo) const;
@@ -62,8 +66,10 @@ protected:
                                                                       RS2::FormatType preferredType);
     bool autoSaveGraphic(RS_Graphic *graphic, QString& fileName);
     bool loadGraphicFromTemplate(RS_Graphic *graphic, const QString &templateFileName, RS2::FormatType type) const;
+    // librecad-mcp: onImportError, as in loadDocument()
     bool loadGraphic(RS_Graphic *graphic, const QString &filename, RS2::FormatType type,
-                     RS2::DxfTextEncoding encoding = RS2::DxfTextEncoding::Declared) const;
+                     RS2::DxfTextEncoding encoding = RS2::DxfTextEncoding::Declared,
+                     std::function<bool(bool, const QString&)> onImportError = nullptr) const;
     bool doSave(RS_Graphic *graphic, bool sameFile);
     bool saveGraphicAs(RS_Graphic *graphic, const QString &filename, RS2::FormatType type, bool forceSave);
     bool backupDrawingFile(const QString &drawingFileName, const RS_Graphic* graphic = nullptr);

@@ -23,6 +23,7 @@
 #ifndef LC_IMAGEEXPORTER_H
 #define LC_IMAGEEXPORTER_H
 
+#include <QRectF>
 #include <QSvgGenerator>
 
 class QFileDevice;
@@ -40,9 +41,13 @@ public:
         QSize borders;
         bool backgroundBlack = false;
         bool blackAndWhite = false;
+        // librecad-mcp: drawing area to show, in world coordinates; a null rectangle fits the whole drawing
+        QRectF window;
     };
     explicit LC_ImageExporter(QObject* parent = nullptr);
     bool exportToImage(RS_Graphic* graphic, const ExportOptions& options);
+    // librecad-mcp: renders into out (options.size, ARGB32 premultiplied) instead of a file
+    bool renderToImage(RS_Graphic* graphic, const ExportOptions& options, QImage& out);
 protected:
     void prepareViewport(RS_Graphic* graphic, const ExportOptions& options, LC_GraphicViewport& viewport);
     void preparePainter(const ExportOptions& options, RS_Painter& painter);

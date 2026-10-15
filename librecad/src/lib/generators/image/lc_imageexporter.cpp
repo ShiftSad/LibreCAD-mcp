@@ -23,6 +23,7 @@
 
 #include "lc_imageexporter.h"
 
+#include <QImage>
 #include <QImageWriter>
 #include <QPixmap>
 #include <QSaveFile>
@@ -88,6 +89,19 @@ bool LC_ImageExporter::exportToImage(RS_Graphic* graphic, const ExportOptions& o
         : exportGraphicToImage(graphic, options, file);
     // Before Qt 6.8.2, commit() ignores a failed flush (QTBUG-132332).
     return written && file.error() == QFileDevice::NoError && file.flush() && file.commit();
+}
+
+// librecad-mcp: in-memory rendering for the Remote API (no file, no dialog)
+bool LC_ImageExporter::renderToImage(RS_Graphic* graphic, const ExportOptions& options, QImage& out) {
+    if (graphic == nullptr || options.size.isEmpty()) {
+        return false;
+    }
+    QImage image(options.size, QImage::Format_ARGB32_Premultiplied);
+    if (image.isNull() || !renderGraphic(graphic, options, &image, false)) {
+        return false;
+    }
+    out = std::move(image);
+    return true;
 }
 
 bool LC_ImageExporter::exportGraphicToSVG(RS_Graphic* graphic, const ExportOptions& options, QFileDevice& output) {
@@ -158,5 +172,12 @@ void LC_ImageExporter::prepareViewport(RS_Graphic* graphic, const ExportOptions&
     viewport.setBorders(borderWidth, borderHeight, borderWidth, borderHeight);
     viewport.setDocument(graphic);
     viewport.loadSettings();
-    viewport.zoomAuto(false);
+    // librecad-mcp: show the given window instead of the whole drawing
+    if (options.window.isNull()) {
+        viewport.zoomAuto(false);
+    }
+    else {
+        viewport.zoomWindow(RS_Vector(options.window.left(), options.window.top()),
+                            RS_Vector(options.window.right(), options.window.bottom()), true);
+    }
 }

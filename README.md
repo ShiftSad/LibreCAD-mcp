@@ -1,5 +1,22 @@
 # LibreCAD [![Build Status](https://travis-ci.org/LibreCAD/LibreCAD.svg?branch=master)](https://travis-ci.org/LibreCAD/LibreCAD) 
 
+> [!IMPORTANT]
+> **This is LibreCAD-mcp, an unofficial fork of [LibreCAD](https://github.com/LibreCAD/LibreCAD).**
+> It is not made or supported by the LibreCAD team. On top of upstream LibreCAD it adds:
+>
+> - **AutoCAD 2018-2026 DWG reading fixes** for AC1032 drawings, the format every AutoCAD from
+>   2018 to 2026 saves (for example, paper-space layout content no longer lands in model space).
+> - **An embedded MCP bridge**: a local, token-protected [Remote API](docs/remote-api/README.md)
+>   inside LibreCAD (off by default, 127.0.0.1 only) and the [`librecad-mcp`](mcp/README.md) MCP
+>   server, so Claude and other MCP clients can open, draw, inspect, measure, render and save
+>   drawings.
+>
+> Downloads: [releases of this fork](https://github.com/ShiftSad/LibreCAD-mcp/releases).
+> Problems with this fork go to [its issues](https://github.com/ShiftSad/LibreCAD-mcp/issues),
+> not upstream's. More: [Remote API design](docs/remote-api/DESIGN.md) ·
+> [keeping in sync with upstream](UPSTREAM_SYNC.md). Everything below this box is upstream
+> LibreCAD's README.
+
 [→ **Download** ←](https://github.com/LibreCAD/LibreCAD/wiki/Download)
 
 [LibreCAD](https://www.librecad.org) is a 2D CAD drawing tool

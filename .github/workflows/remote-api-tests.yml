@@ -1,0 +1,99 @@
+# librecad-mcp: the in-app Remote API, built and tested for real on Linux.
+#
+# Builds LibreCAD and librecad_remote_api_tests (CMake, offscreen Qt), runs the C++ tests through
+# CTest (registered only with LIBRECAD_REGISTER_REMOTE_API_TESTS=ON, as the target is not part of a
+# default build), then the end-to-end script against the built LibreCAD, also through the MCP
+# server. mcp-tests.yml covers the MCP server against its fake; this job covers the C++ side and
+# the upstream files it hooks into (UPSTREAM_SYNC.md section 1).
+
+name: Remote API tests
+
+on:
+  push:
+    branches:
+      - master
+      - 'mcp-*'
+    paths:
+      - 'librecad/src/remote_api/**'
+      - 'CMakeLists.txt'
+      - 'librecad/src/src.pro'
+      - 'librecad/src/main/main.cpp'
+      - 'librecad/src/ui/main/qc_applicationwindow.*'
+      - 'librecad/src/ui/main/qc_mdiwindow.*'
+      - 'librecad/src/ui/main/persistence/lc_documentsstorage.*'
+      - 'librecad/src/ui/dialogs/settings/options_general/qg_dlgoptionsgeneral.*'
+      - 'librecad/src/lib/generators/image/lc_imageexporter.*'
+      - 'librecad/src/lib/engine/settings/lc_settingsexporter.*'
+      - 'librecad/src/lib/fileio/**'
+      - 'tools/remote-api/**'
+      - 'mcp/src/**'
+      - '.github/workflows/remote-api-tests.yml'
+  pull_request:
+    paths:
+      - 'librecad/src/remote_api/**'
+      - 'CMakeLists.txt'
+      - 'librecad/src/src.pro'
+      - 'librecad/src/main/main.cpp'
+      - 'librecad/src/ui/main/qc_applicationwindow.*'
+      - 'librecad/src/ui/main/qc_mdiwindow.*'
+      - 'librecad/src/ui/main/persistence/lc_documentsstorage.*'
+      - 'librecad/src/ui/dialogs/settings/options_general/qg_dlgoptionsgeneral.*'
+      - 'librecad/src/lib/generators/image/lc_imageexporter.*'
+      - 'librecad/src/lib/engine/settings/lc_settingsexporter.*'
+      - 'librecad/src/lib/fileio/**'
+      - 'tools/remote-api/**'
+      - 'mcp/src/**'
+      - '.github/workflows/remote-api-tests.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: C++ tests and end-to-end (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -y update
+          sudo apt-get -qq install qmake6 qt6-base-dev qt6-declarative-dev qt6-image-formats-plugin-pdf qt6-image-formats-plugins qt6-pdf-dev linguist-qt6
+          sudo apt-get -qq install qt6-svg-dev libqt6svgwidgets6 qt6-l10n-tools qtchooser qt6-wayland qt6-wayland-dev qt6-tools-dev
+          sudo apt-get -qq install libgl-dev libxcb-cursor0 libmuparser-dev libboost-dev libssl-dev libssl3
+          sudo apt-get -qq install libfreetype6-dev libicu-dev pkg-config cmake ninja-build
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: mcp/uv.lock
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON \
+            -DLIBRECAD_REGISTER_REMOTE_API_TESTS=ON \
+            -DLIBRECAD_ENABLE_OPENTYPE=OFF
+
+      - name: Build LibreCAD and the Remote API tests
+        run: cmake --build build --target librecad librecad_remote_api_tests -j"$(nproc)"
+
+      - name: C++ Remote API tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build -R librecad_remote_api_tests --output-on-failure
+
+      - name: End to end, also through the MCP server
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python3 tools/remote-api/e2e_smoke.py --exe build/librecad --via-mcp

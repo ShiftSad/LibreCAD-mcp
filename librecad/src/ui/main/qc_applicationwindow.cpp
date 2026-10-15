@@ -84,6 +84,8 @@
 #include "lc_quickinfowidget.h"
 #include "lc_releasechecker.h"
 #include "lc_relzerocoordinateswidget.h"
+#include "lc_remoteapicontroller.h" // librecad-mcp: complete type for m_remoteApi
+#include "lc_remoteapigui.h" // librecad-mcp: autosave gate
 #include "lc_snapmanager.h"
 #include "lc_snapoptionswidgetsholder.h"
 #include "lc_ucslistwidget.h"
@@ -177,6 +179,7 @@ QC_ApplicationWindow::QC_ApplicationWindow() {
  * Destructor.
  */
 QC_ApplicationWindow::~QC_ApplicationWindow() {
+    if (m_remoteApi != nullptr) { m_remoteApi->stop(); } // librecad-mcp: before any member goes
     RS_DEBUG->print("QC_ApplicationWindow::~QC_ApplicationWindow");
 
     // Quitting closes every drawing through doClose(), and the windows' deferred
@@ -1476,10 +1479,11 @@ QG_GraphicView* QC_ApplicationWindow::setupNewGraphicView(const QC_MDIWindow* w)
 bool QC_ApplicationWindow::newDrawingFromTemplate(const QString& fileName, QC_MDIWindow* w) {
     bool ret = false;
     constexpr RS2::FormatType type = RS2::FormatDXFRW;
+    const LC_RemoteApiGui::UserBusyScope remoteApiBusy; // librecad-mcp: no API task inside processEvents below
 
     QApplication::setOverrideCursor(QCursor(Qt::WaitCursor));
     w = createNewDrawingWindow(nullptr, "");
-    qApp->processEvents(QEventLoop::AllEvents, 1000);
+    qApp->processEvents(LC_RemoteApiGui::depth() > 0 ? QEventLoop::ExcludeUserInputEvents : QEventLoop::AllEvents, 1000); // librecad-mcp: no user input inside an API task
 
     const bool noFile = fileName.isEmpty();
     if (noFile) {
@@ -1611,6 +1615,7 @@ void QC_ApplicationWindow::slotFileOpenLegacyLibreCadUtf8() {
 }
 
 void QC_ApplicationWindow::slotEditActiveBlock() {
+    const LC_RemoteApiGui::UserBusyScope remoteApiBusy; // librecad-mcp: no API task inside processEvents below
     QC_MDIWindow* parent = getCurrentMDIWindow();
     if (parent == nullptr) {
         return;
@@ -1727,6 +1732,7 @@ int QC_ApplicationWindow::maybeSurfaceBlocksDock(RS_Graphic *graphic) {
 
 void QC_ApplicationWindow::openFile(const QString& fileName, const RS2::FormatType type,
                                   const RS2::DxfTextEncoding encoding) {
+    const LC_RemoteApiGui::UserBusyScope remoteApiBusy; // librecad-mcp: no API task inside processEvents below
     const bool legacyUtf8 = encoding == RS2::DxfTextEncoding::LegacyLibreCadUtf8;
     if (legacyUtf8 && QFileInfo(fileName).suffix().compare(QLatin1String("dxf"), Qt::CaseInsensitive) != 0) {
         const QString message = tr("Legacy LibreCAD UTF-8 recovery opens DXF files only. "
@@ -1903,6 +1909,7 @@ void QC_ApplicationWindow::slotFileSaveAll() {
  */
 void QC_ApplicationWindow::autoSaveCurrentDrawing() {
     RS_DEBUG->print("QC_ApplicationWindow::autoSaveCurrentDrawing(): begin");
+    if (LC_RemoteApiGui::depth() > 0) { return; } // librecad-mcp: no autosave inside a Remote API task
     if (!LC_GET_ONE_BOOL("Defaults", "AutoBackupDocument", true)) {
         RS_DEBUG->print("QC_ApplicationWindow::autoSaveCurrentDrawing(): AutoBackupDocument disabled");
         startAutoSaveTimer(false);
@@ -1940,6 +1947,11 @@ void QC_ApplicationWindow::showStatusMessage(const QString& msg, [[maybe_unused]
 
 void QC_ApplicationWindow::initCompleted() {
     enableFileActions();
+    // librecad-mcp: start the in-app Remote API when it is enabled in Preferences
+    if (m_remoteApi == nullptr) {
+        m_remoteApi = std::make_unique<LC_RemoteApiController>(this);
+        m_remoteApi->startIfEnabled();
+    }
 }
 
 void QC_ApplicationWindow::slotFileExport() {
@@ -1984,6 +1996,7 @@ void QC_ApplicationWindow::closeWindow(QC_MDIWindow* win) {
 }
 
 bool QC_ApplicationWindow::doCloseAllFiles() {
+    const LC_RemoteApiGui::UserBusyScope remoteApiBusy; // librecad-mcp: no API task between the closes
     bool hasParent(false);
     QC_MDIWindow::SaveOnClosePolicy policy = QC_MDIWindow::SaveOnClosePolicy::ASK;
     // doClose() removes windows from m_windowList, a parent's block editors
@@ -2319,6 +2332,7 @@ void QC_ApplicationWindow::slotOptionsGeneral() {
         // fixme - sand - consider emitting signal on properties change instead of processing changes there
         m_infoCursorSettingsManager->loadFromSettings();
         rebuildMenuIfNecessary();
+        if (m_remoteApi != nullptr) { m_remoteApi->applySettings(); } // librecad-mcp: Remote API tab
     }
     fireCurrentActionIconChanged(nullptr);
 }
@@ -2360,12 +2374,14 @@ void QC_ApplicationWindow::openFilesOnStartup(QStringList& fileList, QSplashScre
 }
 
 bool QC_ApplicationWindow::tryCloseAllBeforeExist() {
+    const LC_RemoteApiGui::UserBusyScope remoteApiBusy; // librecad-mcp: no API task while quitting, until stop()
     m_lastFilesOpener->collectFilesList(m_windowList, m_activeMdiSubWindow);
     const bool mayExit = !doCloseAllFiles();
 
     if (mayExit) {
         m_lastFilesOpener->saveSettings();
         storeSettings();
+        if (m_remoteApi != nullptr) { m_remoteApi->stop(); } // librecad-mcp: no API requests while quitting
     }
     return mayExit;
 }

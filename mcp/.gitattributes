@@ -1,0 +1,7 @@
+# Shell scripts, the Node launcher and the lock file keep LF in every checkout (a CRLF
+# cut-release.sh fails under bash, even Git Bash on Windows).
+*.sh text eol=lf
+*.js text eol=lf
+uv.lock text eol=lf
+*.png binary
+*.mcpb binary

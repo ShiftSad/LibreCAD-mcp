@@ -70,6 +70,10 @@ LC_DlgAbout::LC_DlgAbout(QWidget *parent)
 
     m_info = QString(
         tr("Version: <b>%1</b>").arg(XSTR(LC_VERSION)) + "<br/>" +
+#ifdef LC_MCP_RELEASE
+        // librecad-mcp: name the fork and its build number, so copied reports say which build it is
+        tr("LibreCAD-mcp build: <b>%1</b> (unofficial fork, Remote API for MCP)").arg(LC_MCP_RELEASE) + "<br/>" +
+#endif
 #if defined(Q_CC_CLANG)
         tr("Compiler: Clang %1.%2.%3").arg(__clang_major__).arg(__clang_minor__).arg(__clang_patchlevel__) + "<br/>" +
 #elif defined(Q_CC_GNU)
@@ -84,14 +88,19 @@ LC_DlgAbout::LC_DlgAbout(QWidget *parent)
     ui->lVersionInfo->setText(m_info);
 
 
+    // librecad-mcp: "The Code" is the LibreCAD-mcp fork, followed by a link to upstream
+    // LibreCAD; the contributors and the license stay upstream's.
     ui->lLinks->setText(QString(R"(<a href="https://github.com/LibreCAD/LibreCAD/graphs/contributors">%1</a>)"
                                 "<br/>"
                                 R"(<a href="https://github.com/LibreCAD/LibreCAD/blob/master/LICENSE">%2</a>)"
                                 "<br/>"
-                                R"(<a href="https://github.com/LibreCAD/LibreCAD/">%3</a>)")
+                                R"(<a href="https://github.com/ShiftSad/LibreCAD-mcp/">%3</a>)"
+                                "<br/>"
+                                R"(<a href="https://github.com/LibreCAD/LibreCAD/">%4</a>)")
                             .arg(tr("Contributors"))
                             .arg(tr("License"))
-                            .arg(tr("The Code")));
+                            .arg(tr("The Code"))
+                            .arg(tr("Upstream LibreCAD")));
 
     aboutImageLabels(ui->lblLogo);
 
