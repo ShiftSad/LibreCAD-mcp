@@ -12,8 +12,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   layer by its listed name: another spelling of the name no longer skips the confirmation. An
   unknown name gives `unknown_layer` without a delete.
 - A discovery file left by a LibreCAD that no longer runs is never used, so its token is not sent
-  to whatever listens on that port now.
-- Paths with control characters (a NUL cuts the name the system opens) are refused.
+  to whatever listens on that port now. Its process must also be the LibreCAD that wrote it (a
+  LibreCAD program that started before the file's `started_at`): a pid the system handed to
+  another program does not count.
+- A confirmed discard, layer delete or overwrite acts on the drawing (and the layer, with as many
+  entities) the user was asked about; when it changed while the question was open, nothing
+  happens (`not_confirmed`). The `user_confirmed` path names the drawing's `document_id`, and
+  `close_document`/`delete_layer` then need it.
+- Paths with control characters (a NUL cuts the name the system opens) are refused, and so are
+  `\\?\` and `\\.\` paths even with `LIBRECAD_MCP_ALLOW_NETWORK_PATHS=1`, and a `:` stream in a
+  network path.
 
 ### Changed
 - Every request tells LibreCAD the client's deadline (`X-Request-Timeout-Ms`): LibreCAD answers

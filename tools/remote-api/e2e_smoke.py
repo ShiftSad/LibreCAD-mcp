@@ -1261,6 +1261,33 @@ def step_negative(r: Runner, api: ApiClient, st: State) -> None:
             took = time.monotonic() - started
         r.check("an idle connection does not hold up /status", resp.status == 200 and took < 3.0,
                 f"{took:.2f} s, {resp.status}")
+        # a client that ends its sending after the request (ncat, socat) still reads the answer
+        raw = b""
+        with socket.create_connection((api.host, api.port), timeout=10) as sock:
+            sock.sendall((f"GET /api/v1/status HTTP/1.1\r\nHost: 127.0.0.1:{api.port}\r\n"
+                          f"X-Api-Token: {api.token}\r\n\r\n").encode())
+            sock.shutdown(socket.SHUT_WR)
+            try:
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    raw += chunk
+            except OSError as e:
+                raw += f"<<{type(e).__name__}>>".encode()
+        while raw.startswith(b"HTTP/1.1 1") and b"\r\n\r\n" in raw:  # an interim 100 Continue
+            raw = raw.split(b"\r\n\r\n", 1)[1]
+        r.check("a client that half-closes after its request gets the answer", raw.startswith(b"HTTP/1.1 200"),
+                short(raw[:60]))
+        # small requests are answered at once (a reader that slept between looks took 50 ms each)
+        times = []
+        for _ in range(11):
+            started = time.monotonic()
+            api.get("status")
+            times.append(time.monotonic() - started)
+        times.sort()
+        r.check("small requests are answered at once (median under 40 ms)", times[5] < 0.04,
+                f"{times[5] * 1000:.1f} ms")
 
 
 def step_mcp(r: Runner, api: ApiClient, st: State, args: argparse.Namespace, workdir: Path,

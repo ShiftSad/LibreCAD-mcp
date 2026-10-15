@@ -109,7 +109,7 @@ Tools never fail with an exception: problems come back as `{"error": "<token>", 
 | `file_exists` | Pass `overwrite=True` only after the user agreed. |
 | `unsaved_changes` | Save first, or ask the user before discarding. |
 | `blocked_by_local_policy` | This server refused a file path (see `reason` and `hint`). |
-| `confirmation_required` / `not_confirmed` | The action needs the user's yes. |
+| `confirmation_required` / `not_confirmed` | The action needs the user's yes. `confirmation_required` names the drawing (`document_id`): after the user's yes, call again with that `document_id` and `user_confirmed=True`. `not_confirmed` after a yes means the drawing changed while the user was asked: check it and ask again. |
 | `commands_disabled` | The user turned off command-line access in LibreCAD. |
 
 ## Safety

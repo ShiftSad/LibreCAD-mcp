@@ -54,13 +54,15 @@ command disagree, the command is right: update the table.
 | File | Where | Hook |
 |---|---|---|
 | `CMakeLists.txt` | after `set (SHARED_SOURCES ...)` | `include(.../remote_api/remote_api.cmake)`, then append `LC_REMOTE_API_SOURCES`/`INCLUDES` |
-| `CMakeLists.txt` | after `librecad_lib` and after `librecad` | `target_compile_definitions(... PRIVATE ${LC_REMOTE_API_DEFINES})` (`LC_MCP_RELEASE` and the `LC_REMOTE_API_HAS_*` macros) |
+| `CMakeLists.txt` | after `librecad_lib` and after `librecad` | `target_compile_definitions(... PRIVATE ${LC_REMOTE_API_DEFINES})` (`LC_MCP_RELEASE` and the `LC_REMOTE_API_HAS_*` macros); on Windows `librecad_lib` links `ws2_32` (the Remote API server uses Winsock directly) |
 | `CMakeLists.txt` | inside `if (BUILD_TESTS)`, next to the other `LIBRECAD_REGISTER_*` options | the `librecad_remote_api_tests` target; the option `LIBRECAD_REGISTER_REMOTE_API_TESTS` (off) that registers it with CTest |
 | `librecad/src/src.pro` | next to the other `include()`s | `include($$PWD/remote_api/remote_api.pri)` (qmake is still built by CodeQL) |
 | `.gitignore` | after the core-dump patterns | re-include `librecad/src/remote_api/core/`, which `core` and `core.*` would hide |
 | `librecad/src/ui/main/qc_applicationwindow.h` | class body | forward declaration, `m_remoteApi` next to `m_releaseChecker`, `remoteApi()`, `friend class LC_RemoteApiAppAccess` |
 | `librecad/src/ui/main/qc_applicationwindow.cpp` | includes, `~QC_ApplicationWindow()`, `initCompleted()`, `slotOptionsGeneral()`, `tryCloseAllBeforeExist()`, `autoSaveCurrentDrawing()` | include the controller; stop it first in the destructor; create it and `startIfEnabled()`; `applySettings()` on OK; `stop()` once exit is confirmed; skip autosave while an API task runs |
 | `librecad/src/ui/main/qc_applicationwindow.cpp` | `openFile`, `newDrawingFromTemplate`, `slotEditActiveBlock`, `doCloseAllFiles`, `tryCloseAllBeforeExist` | one `LC_RemoteApiGui::UserBusyScope` line each, so no API task runs inside the `processEvents` (or between the closes) of the user's own action; `newDrawingFromTemplate`'s `processEvents` leaves out user input inside an API task |
+| `librecad/src/plugins/lc_plugininvoker.cpp` | includes, `execPlug` | a `LC_RemoteApiGui::UserBusyScope` for the whole plugin run: its pick loops pump events while `execPlug` holds the document, the view and an undo cycle |
+| `librecad/src/lib/engine/document/entities/rs_polyline.cpp` | `createVertex`, `arcFromBulge` | a bulge under 1e-8 is a straight segment (the API's threshold): a smaller one sweeps under `RS_TOLERANCE_ANGLE`, which `RS_Arc` takes for a full circle of radius chord/(4 bulge); this covers polylines and hatch loops read from DXF and DWG files |
 | `librecad/src/ui/dialogs/settings/options_general/qg_dlgoptionsgeneral.{h,cpp}` | constructor, `ok()` | the "Remote API (MCP)" tab and its `save()` |
 | `librecad/src/main/main.cpp` | before `RS_Settings::init`, window title | `LIBRECAD_SETTINGS_DIR` (INI settings in a folder, for tests); `" MCP"` in the title |
 | `librecad/src/ui/main/qc_mdiwindow.{h,cpp}` | `loadDocument` | a defaulted `onImportError` callback, passed on |

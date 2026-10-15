@@ -152,9 +152,11 @@ While the server runs, LibreCAD keeps a small JSON file that tells local clients
   per-user `%APPDATA%` on Windows).
 - It is rewritten when the server restarts or the token changes, and removed when the server
   stops. If LibreCAD crashes or is killed, the file stays behind; its `pid` then names a process
-  that no longer runs. The MCP server never uses such a stale file: it does not send its token
-  anywhere (another program could hold the port by then, and LibreCAD keeps the token for its
-  next start) and says that LibreCAD is not running.
+  that no longer runs, or, once the system hands the number out again, another program. The MCP
+  server only uses the file while that process is a LibreCAD program that started before the
+  file's `started_at`; otherwise it does not send its token anywhere (another program could hold
+  the port by then, and LibreCAD keeps the token for its next start) and says that LibreCAD is not
+  running.
 - `GET /api/v1/status` reports the path as `discovery_file`, never the token.
 
 The MCP server looks for its connection in this order: `LIBRECAD_API_URL` and
@@ -271,7 +273,7 @@ Each request that changes entities is **one undo step**.
 | `GET /entities` (doc) | entities | Filters `type`, `layer`, `bbox=x1,y1,x2,y2` with `bbox_mode=crossing\|window`, `selected`, `include_hidden`; paging `limit` (up to 1000) and `offset`; `detail=summary\|full`. Returns `{entities, total, offset, limit, next_offset}`. A `layer` that does not exist gives `404 unknown_layer`. |
 | `GET /entities/{id}` (doc) | entities | One entity in full detail. |
 | `POST /entities` (doc) | entities | `{entities: [spec, ...], layer?, select?}`, 1 to 5000 specs. **All or nothing**: if one spec is wrong, nothing is created and one `422 invalid_entity` lists every bad field in `errors` (and the accepted values in `allowed` where there is a list); an `insert` of an unknown block gives `404 unknown_block`. Returns `201 {created, ids, undoable: true}`. |
-| `PATCH /entities/{id}` (doc) | entities | Changes attributes or geometry fields of one entity; the id stays. What the body does not name stays exactly as it was (angles too). A field of another type gives `400 unknown_field` with the accepted fields in `allowed`. A spline read from a file keeps its own knot vector and weights when only its control points move; a new degree, closed flag or number of control points for such a spline, and any geometry change of a polyline with `elliptic_segments`, give `422 invalid_entity`. |
+| `PATCH /entities/{id}` (doc) | entities | Changes attributes or geometry fields of one entity; the id stays. What the body does not name stays exactly as it was (angles too), and is not checked again: a hatch read from a file keeps a pattern LibreCAD has no definition of, or the scale 0 of a solid fill, while its angle or scale changes (a new pattern must be one LibreCAD knows, with a scale > 0). An angular dimension measures the sector that holds `arc_point`, as `POST` does, once `line1`, `line2` or `arc_point` change; repeating what GET reports changes nothing. A field of another type gives `400 unknown_field` with the accepted fields in `allowed`. A spline read from a file keeps its own knot vector and weights when only its control points move; a new degree, closed flag or number of control points for such a spline, and any geometry change of a polyline with `elliptic_segments`, give `422 invalid_entity`. |
 | `DELETE /entities/{id}`, `POST /entities/delete {ids}` (doc) | entities | Deletes; if one id is unknown or locked, nothing is deleted. |
 | `POST /entities/transform` (doc) | transform | `move` (`offset`), `rotate` (`center`, `angle_deg`), `scale` (`base`, `factor` > 0, or `[fx, fy]`; to flip, use `mirror`), `mirror` (`axis`); `copy` and `copies` make copies with new ids. If one entity cannot be transformed, nothing changes: `422 invalid_entity` with `errors` by id. That covers a block reference LibreCAD cannot edit, and a scale with `fx != fy` of text, mtext, a polyline with arc segments, a hatch with curved edges, or a radial or diametric dimension, none of which can follow it. |
 | `GET /selection`, `POST /selection` (doc) | selection | Reads or changes the selection you see: `set`, `add`, `remove`, `clear`, `all`. `ids` and the filters (`type`, `layer`, `bbox`) combine: an entity must match all that are given. `set`, `add` and `remove` need `ids` or a filter (else `400 missing_param`); `all` applies the filters to every entity. |
@@ -290,7 +292,7 @@ read-only values such as `length` or `area`.
 | `arc` | `center`, `radius` > 0, `start_angle_deg`, `end_angle_deg`, `reversed: false` |
 | `ellipse` | `center`, `major_axis` (a vector), `ratio` in (0, 1], `start_angle_deg: 0`, `end_angle_deg: 360`, `reversed: false`. The angles are **parametric** (eccentric anomaly), counter-clockwise from `major_axis`, as DXF stores them: the point at `t` is `center + major_axis·cos t + minor_axis·sin t`. They are polar angles only for a circle-like `ratio` of 1. |
 | `point` | `position` |
-| `polyline` | `vertices: [[x, y] or [x, y, bulge], ...]` (at least 2), `closed: false`. A bulge under 1e-8 is a straight segment. |
+| `polyline` | `vertices: [[x, y] or [x, y, bulge], ...]` (at least 2), `closed: false`. A bulge under 1e-8 is a straight segment, in a polyline read from a DXF or DWG file too. |
 | `spline` | either `control_points` with `degree: 3` (1 to 3), or `fit_points`; `closed: false` |
 | `text` | `position`, `text`, `height` > 0, `angle_deg: 0`, `halign`, `valign`, `style: "standard"`, `width_factor: 1`; `second_point` (the end of the baseline) is required when `halign` is `aligned` or `fit` |
 | `mtext` | `position`, `text`, `height` > 0, `width: 0`, `angle_deg: 0`, `attachment`, `line_spacing: 1`, `style` |
@@ -351,7 +353,7 @@ means more than 5000 entities or ids in one request.
 | 422 | `invalid_entity` (with `errors`, for example `{"entities[2].radius": "must be > 0"}`, and `allowed`), `unsupported_format`, `extension_mismatch`, `import_failed`, `invalid_hatch_boundary`, `not_closed`, `cannot_rename_layer_0`, `cannot_delete_layer_0`, `too_many`, `bad_param` (an unknown save or export `version`, with `allowed`) |
 | 500 | `internal`, `save_failed`, `export_failed` |
 | 501 | `dwg_unsupported` (a build without DWG support) |
-| 503 | `shutting_down`, `server_busy` (more than 16 connections at once: retry) |
+| 503 | `shutting_down`, `server_busy` (16 requests served at once: retry) |
 | 504 | `ui_timeout` (with `started`) |
 
 ## 10. Dialogs, the command line and undo
@@ -368,12 +370,13 @@ A PNG from `/render` cannot carry that field, so it lists closed dialogs in the
 `X-LibreCAD-Skipped-Dialogs` header instead.
 
 **Your dialogs come first.** If you have a dialog open in LibreCAD (Preferences, a file dialog, a
-message), requests do not wait for it: every route, read-only ones included, answers
-`409 gui_modal_open` with the window title. Close it and the client can go on. `/status` still
-answers and says `"modal_open": true` and `"modal_window": "<title>"`. While you have a context
-menu open, drag something, or LibreCAD is busy with your own action (opening a file, closing
-drawings, editing a block, quitting), a request waits until that is over instead of running in
-the middle of it. A request never processes your keyboard or mouse input while it runs, so it
+message, also "Save changes?" while you close drawings or quit), requests do not wait for it:
+every route, read-only ones included, answers `409 gui_modal_open` with the window title. Close
+it and the client can go on. `/status` still answers and says `"modal_open": true` and
+`"modal_window": "<title>"`. While you have a context menu open, drag something, or LibreCAD is
+busy with your own action (opening a file, closing drawings, editing a block, quitting, a plugin
+waiting for you to pick a point or an entity), a request waits until that is over instead of
+running in the middle of it. A request never processes your keyboard or mouse input while it runs, so it
 can neither swallow a dialog you open nor close a window under you.
 
 **Your tool is cancelled.** A request that changes a drawing first cancels the tool you were using
@@ -400,7 +403,7 @@ LibreCAD got to it never runs at all. Autosave waits while a request is running.
 | `Transfer-Encoding: chunked` | refused | `411 length_required` |
 | request line and headers arriving | 5 s | `408 request_timeout` |
 | reading the whole request | 15 s | `408 request_timeout` |
-| connections read at the same time | 16 | `503 server_busy` |
+| connections served at the same time | 16 | `503 server_busy` |
 | entities per `POST /entities`, ids per request | 5000 | `422 too_many` |
 | `GET /entities` page | 1000 | |
 | render size | 64 to 4096 pixels per side | |
@@ -415,9 +418,26 @@ LibreCAD got to it never runs at all. Autosave waits while a request is running.
 
 A client's `X-Request-Timeout-Ms` header caps these: LibreCAD stops waiting at the client's
 deadline (counted from when the request arrived) and answers `504 ui_timeout`, so the client hears
-whether the work started instead of timing out blind. The MCP server waits 30 s per call (50 s for
-new, open, save, save as and export: MCP clients such as Claude Desktop stop a tool after about a
-minute) and sends its deadline less a margin of up to 2 s.
+whether the work started instead of timing out blind. That holds for a request still waiting for
+its turn behind a slow one too: it is answered at its deadline with `"started": false` and never
+runs. Without the header, a request waits for its turn. The MCP server waits 30 s per call (50 s
+for new, open, save, save as and export: MCP clients such as Claude Desktop stop a tool after
+about a minute) and sends its deadline less a margin of up to 2 s.
+
+Connections:
+
+- Each connection is read on its own and requests run one at a time, in the order they arrive.
+- The token, `Host` and `Origin` are checked as soon as the headers are in: a client without the
+  token is answered at once and never gets to send its body.
+- When all 16 connections are busy, the oldest one that has not sent its headers yet is closed
+  (`408`) to make room for the new one; only when all 16 are past their headers is the new one
+  answered `503 server_busy`. A refused connection is read for up to a second before it is
+  closed, so the client reads the refusal instead of a reset.
+- A client may end its sending after the request (a half-close, as `ncat` or `socat` do, or
+  `shutdown(SHUT_WR)`): it still gets the answer. LibreCAD then sends an HTTP/1.1 client an interim
+  `HTTP/1.1 100 Continue` first, which a client that really closed its socket answers with a reset:
+  that is how LibreCAD tells a client that gave up (its waiting request is dropped) from one that
+  still reads. HTTP clients skip interim answers; HTTP/1.0 requests get none.
 
 ## 12. Security model
 
@@ -434,13 +454,15 @@ a password. The rules:
    rebinding. A web page you visit therefore cannot use the API, even if it guessed the port.
 4. **File paths** for open, save-as and export must be absolute, without control characters (a
    NUL would cut the name the system opens: `run.bat\0.dxf` writes `run.bat`) and, on Windows,
-   without a `:` after the drive (`host.txt:x.pdf` is a hidden stream of `host.txt`) or a device
-   name such as `COM1.dxf` or `NUL.svg`; they are
-   normalized first. Network paths (`\\server\share`, `\\?\`, device paths, `//host`) are
-   refused unless you allow them, because opening one can send your Windows credentials to that
-   server. With **Restrict file access** set, only paths inside those folders are accepted
+   without a `:` after the drive (`host.txt:x.pdf` is a hidden stream of `host.txt`; on a share
+   too) or a device name such as `COM1.dxf` or `NUL.svg`; they are
+   normalized first. Network paths (`\\server\share`, `//host`) are refused unless you allow
+   them, because opening one can send your Windows credentials to that server. Device-namespace
+   paths (`\\?\C:\...`, `\\.\...`) are always refused (`403 path_not_allowed`): write
+   `C:\...` instead. With **Restrict file access** set, only paths inside those folders are accepted
    (`403 path_not_allowed`), checked after resolving symbolic links and, on Windows, directory
-   junctions and mount points, so no link inside an allowed folder leads out of it. The file
+   junctions and mount points, at any path length, so no link inside an allowed folder leads out
+   of it; a path whose links cannot be resolved is refused. The file
    extension must match the format, an existing file is never replaced without `"overwrite": true`
    (`409 file_exists`), and a file open in another LibreCAD window is never written.
 5. **Destructive actions need an explicit flag**: `discard_changes` to close a modified drawing,
@@ -451,7 +473,9 @@ a password. The rules:
    command history. Closing with discarded changes, deleting a layer and overwriting a file are
    always written, whatever that option says.
 8. **Limits** on request size and time (section 11) keep a broken client from hanging LibreCAD,
-   and each connection is read on its own, so an idle or slow one blocks no other client.
+   and each connection is read on its own, so an idle or slow one blocks no other client. A
+   program without the token is answered as soon as its headers are in, and idle connections
+   give way to new ones, so it cannot hold the API's connections either.
 
 What this does **not** protect against: a program that already runs under your user account can
 read the discovery file or your settings and so the token, just as it could read your drawings
@@ -476,12 +500,12 @@ computers.
 |---|---|
 | The MCP server says LibreCAD is not reachable | Is LibreCAD running, and is the Remote API enabled? Look at the status line of the Remote API tab. |
 | `401 unauthorized` | The client has an old token. Remove `LIBRECAD_API_TOKEN` from its configuration so it reads the discovery file, or copy the current token again. |
-| "the Remote API discovery file ... was left by a LibreCAD that is no longer running" | LibreCAD crashed or was killed. Start it again: it rewrites the file. |
-| `503 server_busy` | More than 16 connections at once. Retry; if it persists, a program keeps connections open to the port. |
+| "the Remote API discovery file ... was left by a LibreCAD that is no longer running" | LibreCAD crashed or was killed (the message may add that its process number now belongs to another program). Start it again: it rewrites the file. |
+| `503 server_busy` | 16 requests are being served or sent at once. Retry; if it persists, a program sends requests to the port without end. |
 | `Port 13140 is in use` | Another LibreCAD (or another program) has the port. Close it or choose another port; the discovery file always holds the right one. |
 | `409 gui_modal_open` | Close the dialog that is open in LibreCAD. |
 | `504 ui_timeout` | LibreCAD was busy. Check with `/documents` or `/entities` whether the change happened before repeating it. |
-| `403 path_not_allowed` | The path is outside the folders allowed in the Remote API tab (or in `LIBRECAD_MCP_ALLOWED_ROOTS`), or it is a network path. |
+| `403 path_not_allowed` | The path is outside the folders allowed in the Remote API tab (or in `LIBRECAD_MCP_ALLOWED_ROOTS`), a network path, or a `\\?\` / `\\.\` path (write `C:\...`). |
 | `403 commands_disabled` | Turn on "Allow running command-line commands". |
 | `422 invalid_entity` on text | `aligned` and `fit` text need `second_point`. If the error names `style`, LibreCAD found no font at all; check Options > Application Preferences > Paths (an unknown style name alone only adds a warning: LibreCAD uses another font). |
 | `404 not_found` on a route the docs list | The LibreCAD build is older than the MCP server; compare `capabilities` in `/status`. |
