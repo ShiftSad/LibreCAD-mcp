@@ -936,6 +936,11 @@ bool dwgReaderR11::readEntityR11(DRW_Interface& intfa,
     // constructor). The override is applied INSTEAD of the layer default.
     auto applyAttrs = [&](DRW_Entity& ent) {
         ent.layer = curLayer;
+        // An entity of the paper space (R11 has one) carries the flag, as a
+        // DXF entity carries group 67. A block's own entities are routed by
+        // their BLOCK scope, whatever the flag says.
+        if (flag & FLAG_HAS_PSPACE)
+            ent.space = DRW::PaperSpace;
         if (hasColorOverride) ent.color = colorOverride;
         if (hasLtypeOverride) {
             const std::string n = ltypeName(ltypeOverride);
