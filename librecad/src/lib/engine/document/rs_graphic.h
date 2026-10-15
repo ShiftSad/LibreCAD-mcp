@@ -48,6 +48,7 @@ class LC_DimStylesList;
 class QString;
 
 class LC_View;
+class LC_PaperSpaceStore;
 class QG_LayerWidget;
 
 /**
@@ -105,6 +106,15 @@ public:
     const std::vector<LC_Layout>& layouts() const {
         return m_dwgAdvancedMetadata.layouts();
     }
+    /**
+     * What the paper spaces of the layouts hold. Those entities are not in
+     * model space nor in the block list: LibreCAD neither draws nor edits
+     * them, and a DXF save writes them back to their layouts.
+     */
+    LC_PaperSpaceStore& paperSpaces() {return *m_paperSpaces;}
+    const LC_PaperSpaceStore& paperSpaces() const {return *m_paperSpaces;}
+    /** Renames the INSERTs of model space and of the paper spaces. */
+    void renameInserts(const QString& oldName, const QString& newName) override;
     /** @return pointer to the layout record matching @p handle, or nullptr. */
     const LC_Layout* findLayout(std::uint32_t handle) const;
 
@@ -371,6 +381,8 @@ private:
     LC_TextStyleList m_textStyleList;
 
     LC_DwgAdvancedMetadata m_dwgAdvancedMetadata;
+    /** Declared after the lists its entities refer to, so it goes first. */
+    std::unique_ptr<LC_PaperSpaceStore> m_paperSpaces;
 
     /** Active paper-space layout handle.  0 == "no explicit selection"
      *  (legacy behavior — UI defaults to modelspace / first layout). */

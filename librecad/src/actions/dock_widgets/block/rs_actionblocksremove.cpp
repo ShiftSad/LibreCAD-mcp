@@ -26,6 +26,7 @@
 
 #include "rs_actionblocksremove.h"
 
+#include "lc_paperspacestore.h"
 #include "rs_dialogfactory.h"
 #include "rs_dialogfactoryinterface.h"
 #include "rs_graphic.h"
@@ -55,6 +56,10 @@ bool RS_ActionBlocksRemove::doTriggerModifications(LC_DocumentModificationBatch&
     containerList.push_back(m_graphic);
     for (int bi = 0; bi < blockList->count(); bi++) {
         containerList.push_back(blockList->at(bi));
+    }
+    // The layouts' entities too, though no view shows them.
+    for (const auto& paperSpace : m_graphic->paperSpaces().spaces()) {
+        containerList.push_back(paperSpace.entities.get());
     }
 
     for (const auto block: std::as_const(blocks)) {

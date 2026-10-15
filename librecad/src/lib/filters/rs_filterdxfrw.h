@@ -2329,6 +2329,14 @@ public:
   std::uint32_t dxfReference(std::uint32_t source) const;
   /** Numbered paper spaces (*Paper_Space0, ...) the written layouts need. */
   std::vector<std::string> dxfExtraPaperSpaceNames() const;
+  /** The entities of the layout whose paper space is named @p name, when the
+   *  save in progress writes them: the active layout's into ENTITIES with
+   *  group 67, another's into its *Paper_SpaceN block. Else nullptr. */
+  RS_EntityContainer *writtenPaperSpace(const QString &name) const;
+  /** The containers of every layout the save in progress writes. */
+  std::vector<RS_EntityContainer *> writtenPaperSpaces() const;
+  /** Writes the entities of a layout's paper space as those of model space. */
+  void writePaperSpaceEntities(RS_EntityContainer *paperSpace);
   /** Make references to source block records follow them to their written handles. */
   void installDxfBlockRecordRemap();
   /** Whether a raw DXF record read from version @p source is written into the DXF being exported. */
@@ -3128,6 +3136,12 @@ private:
   // What the codec left out of the last export (DXF or DWG leftOut()).
   std::map<std::string, std::size_t> m_writeLeftOut;
   std::map<std::string, std::size_t> m_shapeLeftOut;
+  // Set while writePaperSpaceEntities() runs: getEntityAttributes() marks
+  // what it writes as paper space.
+  bool m_writingPaperSpace = false;
+  // Entities of layouts the last export had no place for, and why.
+  std::size_t m_paperSpaceEntitiesLeftOut = 0;
+  QString m_paperSpaceLeftOutReason;
   QString m_shapeExportDirectory;
   std::map<std::uint32_t, QString> m_shapeFileResolvedPaths;
   struct ShapeExportRecord {
@@ -3325,14 +3339,21 @@ private:
    *  back to m_importLayerCache (which does normalize) on a miss, so this
    *  is purely additive -- never the only source of truth for a name. */
   QHash<QString, RS_Layer *> m_importLayerRawCache;
-  /** Pointer to entity container to store possible orphan entities like paper
-   * space */
+  /** The import sink for entities nothing keeps, such as those of a block
+   *  whose name an earlier block took. */
   RS_EntityContainer *m_dummyContainer = nullptr;
-  /** The container an imported entity goes to. LibreCAD keeps no paper
-   *  space: an entity flagged as paper space (DXF group 67, DWG entity mode
-   *  1) that arrives while model space is the current container belongs to
-   *  the first layout, and goes to m_dummyContainer instead. */
-  RS_EntityContainer *importContainerFor(const DRW_Entity &data) const;
+  /** The container an imported entity goes to. An entity flagged as paper
+   *  space (DXF group 67, DWG entity mode 1) that arrives while model space
+   *  is the current container belongs to the active layout, and goes to its
+   *  paper space (RS_Graphic::paperSpaces()) instead. */
+  RS_EntityContainer *importContainerFor(const DRW_Entity &data);
+  /** Ids of the paper-space entities a callback left in model space anyway,
+   *  noted by setEntityAttributes(); finishPaperSpaceImport() moves them. */
+  std::set<unsigned long long> m_paperSpaceEntitiesInModelSpace;
+  /** Ends the import of a drawing with layout content: what a callback left
+   *  in model space goes to its layout, a model space with nothing to show
+   *  shows the active layout instead, and the user learns of either. */
+  void finishPaperSpaceImport();
   void applyParsedDimStyleExtData(const LC_DimStyle *dimStyle,
                                   const QString &appName,
                                   const std::vector<DRW_Variant> &vector);

@@ -474,6 +474,7 @@ HEADERS += \
     lib/engine/document/textstyles/lc_textstylelist.h \
     lib/engine/document/ucs/lc_ucslist.h \
     lib/engine/document/lc_plot_settings.h \
+    lib/engine/document/lc_paperspacestore.h \
     lib/engine/overlays/angles_base/lc_overlayanglesbasemark.h \
     lib/engine/overlays/highlight/lc_highlight.h \
     lib/actions/lc_modifiersinfo.h \
@@ -1051,6 +1052,7 @@ SOURCES += \
     lib/engine/document/textstyles/lc_textstylelist.cpp \
     lib/engine/document/ucs/lc_ucslist.cpp \
     lib/engine/document/lc_plot_settings.cpp \
+    lib/engine/document/lc_paperspacestore.cpp \
     lib/engine/overlays/angles_base/lc_overlayanglesbasemark.cpp \
     lib/engine/overlays/info_cursor/lc_cursoroverlayinfo.cpp \
     lib/engine/overlays/lc_overlayentitiescontainer.cpp \

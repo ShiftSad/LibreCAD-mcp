@@ -2184,6 +2184,8 @@ set (SHARED_SOURCES
      librecad/src/ui/action_options/print_preview/lc_print_preview_options_filler.h
      librecad/src/lib/engine/document/lc_plot_settings.cpp
      librecad/src/lib/engine/document/lc_plot_settings.h
+     librecad/src/lib/engine/document/lc_paperspacestore.cpp
+     librecad/src/lib/engine/document/lc_paperspacestore.h
      librecad/src/lib/engine/overlays/references/lc_ref_snap_mark.cpp
      librecad/src/lib/engine/overlays/references/lc_ref_snap_mark.h
      librecad/src/lib/engine/overlays/references/lc_ref_snap_construction_line.cpp
@@ -2732,6 +2734,7 @@ if (BUILD_TESTS)
         librecad/src/lib/filters/tests/dxf_legacy_name_reference_tests.cpp
         librecad/src/lib/filters/tests/lc_dxf_reopen_dwg_export_tests.cpp
         librecad/src/lib/filters/tests/lc_dxf_shape_name_tests.cpp
+        librecad/src/lib/filters/tests/lc_dxf_paper_space_tests.cpp
         librecad/src/lib/filters/tests/lc_dxf_appid_registration_tests.cpp
         librecad/src/lib/filters/tests/lc_dxf_xdata_appid_tests.cpp
         librecad/src/lib/filters/tests/lc_export_commit_tests.cpp
@@ -3254,6 +3257,7 @@ if (BUILD_TESTS)
         librecad/src/lib/filters/tests/dxf_legacy_name_reference_tests.cpp
         librecad/src/lib/filters/tests/lc_dxf_reopen_dwg_export_tests.cpp
         librecad/src/lib/filters/tests/lc_dxf_shape_name_tests.cpp
+        librecad/src/lib/filters/tests/lc_dxf_paper_space_tests.cpp
         librecad/src/lib/filters/tests/lc_dxf_appid_registration_tests.cpp
         librecad/src/lib/filters/tests/lc_dxf_xdata_appid_tests.cpp
         librecad/src/lib/filters/tests/mleader_dxf_context_tests.cpp
@@ -3342,6 +3346,10 @@ if (BUILD_TESTS)
     add_librecad_filter_micro_test(
         librecad_filter_writer_lifetime_tests
         librecad/src/lib/filters/tests/lc_filter_writer_lifetime_tests.cpp)
+
+    add_librecad_filter_micro_test(
+        librecad_dxf_paper_space_tests
+        librecad/src/lib/filters/tests/lc_dxf_paper_space_tests.cpp)
 
     add_librecad_filter_micro_test(
         librecad_entity_pen_inheritance_tests

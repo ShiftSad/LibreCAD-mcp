@@ -67,6 +67,12 @@ bool convertFile(const QString& inputFile, const QString& outputFile, RS2::Forma
         qCritical("ERROR: failed to export '%s'", qPrintable(outputFile));
         return false;
     }
+    // What the file could not hold; the export itself went through.
+    const QString leftOut = RS_FileIO::instance()->lastExportReport();
+    if (!leftOut.isEmpty()) {
+        qWarning("WARNING: left out of '%s': %s", qUtf8Printable(outputFile),
+                 qUtf8Printable(leftOut.split(QLatin1Char('\n')).join(QStringLiteral("; "))));
+    }
 
 #ifdef DWGSUPPORT
     if (outFmt == RS2::FormatDWG)

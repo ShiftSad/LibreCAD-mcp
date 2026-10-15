@@ -34,6 +34,7 @@
 #include "lc_dimarrowregistry.h"
 #include "lc_dimstyleslist.h"
 #include "lc_dimstyletovariablesmapper.h"
+#include "lc_paperspacestore.h"
 #include "rs_debug.h"
 #include "rs_dialogfactory.h"
 #include "rs_dialogfactoryinterface.h"
@@ -152,7 +153,8 @@ void RS_Graphic::freezeAllBlocks(const bool freeze) {
  * Default constructor.
  */
 RS_Graphic::RS_Graphic(RS_EntityContainer* parent)
-    : RS_Document(parent), m_autosaveFilename{"Unnamed"}, m_plotSettings{std::make_unique<LC_PlotSettings>(this)} {
+    : RS_Document(parent), m_paperSpaces{std::make_unique<LC_PaperSpaceStore>(this)},
+      m_autosaveFilename{"Unnamed"}, m_plotSettings{std::make_unique<LC_PlotSettings>(this)} {
 
     RS_DEBUG->print("RS_Graphic constructor: autosaveFilename initialized as '%s'", m_autosaveFilename.toLatin1().data());
 
@@ -232,6 +234,11 @@ void RS_Graphic::onLoadingCompleted() {
     updateDimensions(true);
 }
 
+void RS_Graphic::renameInserts(const QString& oldName, const QString& newName) {
+    RS_Document::renameInserts(oldName, newName);
+    m_paperSpaces->renameInserts(oldName, newName);
+}
+
 /**
  * Counts the m_entities on the given layer.
  */
@@ -294,6 +301,9 @@ void RS_Graphic::removeLayer(RS_Layer* layer) {
                 e->setLayer("0");
             }
 
+            // The entities of the layouts are kept, on layer 0.
+            m_paperSpaces->moveEntitiesToLayerZero(layerName);
+
             m_layerList.remove(layer);
         }
         validateSelection();
@@ -308,6 +318,7 @@ void RS_Graphic::initForNewDocument() {
     RS_DEBUG->print("RS_Graphic::newDoc: before clear, autosaveFilename='%s'", m_autosaveFilename.toLatin1().data());
     m_dwgAdvancedMetadata.clear();
     m_dxfRecoverySourceFile.clear();
+    m_paperSpaces->clear();
     clear();
     clearLayers();
     clearBlocks();
