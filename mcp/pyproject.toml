@@ -1,0 +1,43 @@
+[project]
+name = "librecad-mcp"
+version = "0.1.0"
+description = "Work a running LibreCAD (LibreCAD-mcp build) from Claude or any MCP client: open, draw, inspect, measure, render and save 2D CAD drawings (DXF/DWG)"
+readme = "README.md"
+license = { text = "GPL-2.0-or-later" }
+authors = [{ name = "ShiftSad" }]
+requires-python = ">=3.11"
+keywords = ["mcp", "librecad", "cad", "dxf", "dwg", "2d-cad", "claude", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: GNU General Public License v2 or later (GPLv2+)",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics :: Editors :: Vector-Based",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = ["mcp>=2.2,<3", "httpx>=0.27,<1"]
+
+[project.urls]
+Homepage = "https://github.com/ShiftSad/LibreCAD-mcp"
+Repository = "https://github.com/ShiftSad/LibreCAD-mcp"
+Documentation = "https://github.com/ShiftSad/LibreCAD-mcp/tree/master/mcp#readme"
+Changelog = "https://github.com/ShiftSad/LibreCAD-mcp/blob/master/mcp/CHANGELOG.md"
+Issues = "https://github.com/ShiftSad/LibreCAD-mcp/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "respx>=0.21"]
+
+[project.scripts]
+librecad-mcp = "librecad_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/librecad_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
