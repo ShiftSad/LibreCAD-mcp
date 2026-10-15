@@ -1153,6 +1153,61 @@ TEST_CASE("Remote API server answers a request with bare LF line endings at once
     CHECK(exchange(port, "\r\n" + get("/api/v1/ping", port, fixture.token)).status == 200);
 }
 
+TEST_CASE("Remote API server: a request dropped while queued leaves the queue with its body", "[remote-api][server]") {
+    Fixture fixture;
+    std::atomic<int> runs{0};
+    LC_RouteOptions gui;
+    gui.capability = "test";
+    gui.timeoutMs = 120000; // as open, save and export
+    fixture.router.add("POST", "/api/v1/slow", gui, [](LC_ApiCall&) { return LC_ApiResponse::ok({}); });
+    fixture.router.add("POST", "/api/v1/sink", gui, [&runs](LC_ApiCall&) {
+        ++runs;
+        return LC_ApiResponse::ok({}, 201);
+    });
+    const quint16 port = fixture.start();
+    const QByteArray head = "Host: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " + fixture.token + "\r\n";
+    const QByteArray body = "{" + QByteArray(256 * 1024, ' ') + "}";
+    const QByteArray sink = "POST /api/v1/sink HTTP/1.1\r\n" + head + "Content-Length: " + QByteArray::number(body.size());
+
+    // The first request holds the dispatcher: nothing pumps the GUI thread yet.
+    HttpReply first;
+    std::thread holder([&] { first = exchange(port, "POST /api/v1/slow HTTP/1.1\r\n" + head + "Content-Length: 0\r\n\r\n", 20000); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // answered at their deadline while they wait behind it
+    for (int i = 0; i < 5; ++i) {
+        CAPTURE(i);
+        const HttpReply dropped = exchange(port, sink + "\r\nX-Request-Timeout-Ms: 100\r\n\r\n" + body, 5000);
+        CHECK(dropped.status == 504);
+    }
+    // their bodies went with them, though the dispatcher has not got to them (it would hold them for as
+    // long as the first request runs: up to 120 s)
+    CHECK(fixture.server->queuedBodyBytes() == 0);
+
+    // one that still waits keeps its body until its client leaves
+    const NativeSocket waiting = connectNative(port);
+    REQUIRE(waiting != NoSocket);
+    REQUIRE(sendNative(waiting, sink + "\r\n\r\n" + body));
+    QElapsedTimer timer;
+    timer.start();
+    while (fixture.server->queuedBodyBytes() != body.size() && timer.elapsed() < 3000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(fixture.server->queuedBodyBytes() == body.size());
+    closeNative(waiting);
+    timer.restart();
+    while (fixture.server->queuedBodyBytes() != 0 && timer.elapsed() < 3000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(fixture.server->queuedBodyBytes() == 0);
+
+    pumpFor(300); // LibreCAD is free again: the first one runs, the dropped ones never
+    holder.join();
+    CHECK(first.status == 200);
+    pumpFor(200);
+    CHECK(runs.load() == 0);
+}
+
 TEST_CASE("Remote API server: a second server cannot take the port", "[remote-api][server]") {
     Fixture fixture;
     const quint16 port = fixture.start();

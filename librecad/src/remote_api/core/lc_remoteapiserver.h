@@ -71,6 +71,7 @@ class LC_RemoteApiRouter;
  *       GUI thread at that deadline;
  *     - a client whose connection fails is gone: a queued request is dropped
  *       without running, a running one stops waiting for the GUI thread;
+ *     - a dropped request leaves the queue at once, with its body;
  *     - a client that ends its sending (a half-close, or a full close) may still
  *       read: an HTTP/1.1 client is sent "100 Continue", and again every
  *       interimRepeatMs while it waits, which a closed socket answers with a
@@ -128,6 +129,8 @@ public:
 
     // Steps 2 and 4 for one parsed request (also used by the tests).
     LC_ApiResponse handle(const LC_ApiRequest& request) const;
+    // The bytes of request bodies waiting for the dispatcher (for the tests).
+    qint64 queuedBodyBytes() const;
 
 protected:
     void run() override;
@@ -157,6 +160,8 @@ private:
     void drainLater(qintptr descriptor);
     void serviceDraining(bool closeAll);       // the accepting thread
     bool enqueue(const std::shared_ptr<Job>& job);
+    // A reader that dropped its job takes it out of the queue, with its body.
+    void forget(const std::shared_ptr<Job>& job);
     bool writeAll(qintptr descriptor, const QByteArray& data) const;
     bool hostAllowed(const QByteArray& host) const;
     // Step 2: the refusal of a request that may not reach the router, if any;
@@ -180,7 +185,7 @@ private:
     std::atomic<quint16> m_port{0};
 
     // requests waiting for the dispatcher
-    std::mutex m_queueMutex;
+    mutable std::mutex m_queueMutex;
     std::condition_variable m_queueChanged;
     std::deque<std::shared_ptr<Job>> m_queue;
 

@@ -44,6 +44,7 @@
 #include <unistd.h>
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <climits>
 #include <list>
@@ -800,6 +801,29 @@ bool LC_RemoteApiServer::enqueue(const std::shared_ptr<Job>& job) {
     return true;
 }
 
+void LC_RemoteApiServer::forget(const std::shared_ptr<Job>& job) {
+    {
+        const std::lock_guard<std::mutex> lock(m_queueMutex);
+        const auto it = std::find(m_queue.begin(), m_queue.end(), job);
+        if (it != m_queue.end()) {
+            m_queue.erase(it);
+        }
+    }
+    // Dropped, so the dispatcher no longer reads it (it skips a job it could not
+    // take): the body is freed now, not when the dispatcher gets to the job
+    // behind a request that may hold it for minutes.
+    job->request = LC_ApiRequest();
+}
+
+qint64 LC_RemoteApiServer::queuedBodyBytes() const {
+    const std::lock_guard<std::mutex> lock(m_queueMutex);
+    qint64 bytes = 0;
+    for (const std::shared_ptr<Job>& job : m_queue) {
+        bytes += job->request.body.size();
+    }
+    return bytes;
+}
+
 void LC_RemoteApiServer::dispatchLoop() {
     for (;;) {
         std::shared_ptr<Job> job;
@@ -921,11 +945,14 @@ void LC_RemoteApiServer::serveConnection(const qintptr descriptor, const std::sh
             }
             if (gone) {
                 job->clientGone = true;
-                job->drop(); // still queued: it never runs
-                return;      // reset
+                if (job->drop()) { // still queued: it never runs
+                    forget(job);
+                }
+                return; // reset
             }
             if (job->clientDeadline.hasExpired() && job->drop()) {
                 // still queued at the client's deadline: answered now, and it never runs
+                forget(job);
                 response = waitedPastDeadline();
                 break;
             }
