@@ -11806,6 +11806,16 @@ void RS_FilterDXFRW::addHeader(const DRW_Header *data) {
   }
 }
 
+namespace {
+// Defined with dxfExtraPaperSpaceNames().
+bool writesLayoutObject(const LC_DwgAdvancedMetadata::LayoutRecord &layout,
+                        int version, bool dwg);
+QString numberedPaperSpaceOf(const LC_DwgAdvancedMetadata &metadata,
+                             const LC_DwgAdvancedMetadata::LayoutRecord &layout);
+std::vector<std::pair<std::string, const LC_DwgAdvancedMetadata::LayoutRecord *>>
+numberedLayoutSpaces(const RS_Graphic &graphic, int version, bool dwg);
+} // namespace
+
 /**
  * Implementation of the method used for RS_Export to communicate
  * with this filter.
@@ -12079,7 +12089,14 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
       reserveAll(md.dictionaries(), "DICTIONARY");
       reserveAll(md.xrecords(), "XRECORD");
       reserveAll(md.groups(), "GROUP");
-      reserveAll(md.layouts(), "LAYOUT");
+      // A LAYOUT is a reference target only when the writer takes it
+      // (writesLayoutObject()): a dictionary entry naming another is
+      // dropped, as the layout is left out.
+      reserveAll(md.layouts(), "LAYOUT", false);
+      for (const auto &layout : md.layouts()) {
+        if (writesLayoutObject(layout, m_version, true))
+          m_dwgWriteKnownHandles.insert(layout.handle);
+      }
       reserveAll(md.mlineStyles(), "MLINESTYLE");
       reserveAll(md.dictionaryVars(), "DICTIONARYVAR");
       reserveAll(md.fieldLists(), "FIELDLIST");
@@ -12647,8 +12664,24 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
     };
     for (const auto &record : metadata.mlineStyles())
       reserveFixedTyped(record.handle, record.replayState);
-    for (const auto &record : metadata.layouts())
-      reserveFixedTyped(record.handle, record.replayState);
+    // The LAYOUTs this save may write: R2000 and later only, and one of a
+    // numbered paper space only with that space (writesLayout() decides once
+    // the dictionaries of the layouts are known).
+    std::set<QString> plannedPaperSpaces;
+    for (const auto &[name, layout] : numberedLayoutSpaces(g, m_version, false))
+      plannedPaperSpaces.insert(QString::fromUtf8(name.c_str()).toLower());
+    const auto layoutPlanned =
+        [&](const LC_DwgAdvancedMetadata::LayoutRecord &layout) {
+          if (!writesLayoutObject(layout, m_version, false))
+            return false;
+          const QString numbered = numberedPaperSpaceOf(metadata, layout);
+          return numbered.isEmpty() ||
+                 plannedPaperSpaces.count(numbered.toLower()) != 0;
+        };
+    for (const auto &record : metadata.layouts()) {
+      if (layoutPlanned(record))
+        reserveFixedTyped(record.handle, record.replayState);
+    }
     for (const auto &record : metadata.geoPositionMarkers())
       reserveFixedTyped(record.handle, record.replayState, false);
     for (const auto &record : metadata.sectionObjects())
@@ -12909,8 +12942,10 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
       noteDataOnly(r.handle, r.parentHandle, r.replayState, DRW::AC1015);
     for (const auto &r : metadata.mlineStyles())
       noteDataOnly(r.handle, r.parentHandle, r.replayState);
-    for (const auto &r : metadata.layouts())
-      noteDataOnly(r.handle, r.parentHandle, r.replayState);
+    for (const auto &r : metadata.layouts()) {
+      if (layoutPlanned(r))
+        noteDataOnly(r.handle, r.parentHandle, r.replayState);
+    }
     for (const auto &r : metadata.wipeoutVariables())
       noteDataOnly(r.handle, r.parentHandle, r.replayState);
     for (const auto &r : metadata.pointCloudDefinitions())
@@ -12995,7 +13030,10 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
       // a reader looks for layouts there and nowhere else.
       const auto ownsLayouts = std::any_of(
           metadata.layouts().cbegin(), metadata.layouts().cend(),
-          [&d](const auto &layout) { return layout.parentHandle == d.handle; });
+          [&d, &emittedObjectHandles](const auto &layout) {
+            return layout.parentHandle == d.handle &&
+                   emittedObjectHandles.count(layout.handle) != 0;
+          });
       const auto layoutsNamed = std::any_of(
           rootEntries.cbegin(), rootEntries.cend(),
           [](const auto &entry) { return entry.first == "ACAD_LAYOUT"; });
@@ -13463,12 +13501,40 @@ void RS_FilterDXFRW::writeBlockRecords() {
 }
 
 namespace {
+// Whether a save of @p version (a DXF or DWG version number, 1009 to 1032)
+// writes the LAYOUT object of @p layout at all: LAYOUT is an R2000 object, the
+// writers take a replayable record with a handle only, and a DWG writer none
+// whose application data DWG cannot hold.
+bool writesLayoutObject(const LC_DwgAdvancedMetadata::LayoutRecord &layout,
+                        const int version, const bool dwg) {
+  if (version < 1015 || layout.handle == 0 ||
+      layout.replayState != LC_DwgAdvancedMetadata::ReplayState::ReplayAllowed)
+    return false;
+  return !dwg || !hasDxfTableAppDataUnsupportedByDwg(layoutFromMetadata(layout));
+}
+
+// The numbered paper space (*Paper_Space0, ...) @p layout keeps its entities
+// in; empty for model space, for the active layout's paper space, or for a
+// block record the drawing does not know.
+QString numberedPaperSpaceOf(const LC_DwgAdvancedMetadata &metadata,
+                             const LC_DwgAdvancedMetadata::LayoutRecord &layout) {
+  const auto record =
+      metadata.spaceBlockRecords().find(layout.paperSpaceBlockRecordHandle);
+  if (record == metadata.spaceBlockRecords().end())
+    return {};
+  const QString name = QString::fromUtf8(record->second.c_str());
+  return LC_PaperSpaceStore::isPaperSpaceName(name) &&
+                 !LC_PaperSpaceStore::isActivePaperSpaceName(name)
+             ? name
+             : QString();
+}
+
 // The layouts whose paper space is a numbered one (*Paper_Space0, ...), with
-// the name of that block record, that a save of @p version (a DXF or DWG
-// version number, 1009 to 1032) writes: LAYOUT objects are R2000 and later,
-// and only a layout whose record is written keeps its paper space.
+// the name of that block record, that a save of @p version writes, as a DWG
+// when @p dwg: only a layout whose LAYOUT is written (writesLayoutObject())
+// keeps its paper space.
 std::vector<std::pair<std::string, const LC_DwgAdvancedMetadata::LayoutRecord *>>
-numberedLayoutSpaces(const RS_Graphic &graphic, const int version) {
+numberedLayoutSpaces(const RS_Graphic &graphic, const int version, const bool dwg) {
   std::vector<std::pair<std::string, const LC_DwgAdvancedMetadata::LayoutRecord *>>
       layouts;
   if (version < 1015)
@@ -13477,8 +13543,7 @@ numberedLayoutSpaces(const RS_Graphic &graphic, const int version) {
   const auto &spaces = metadata.spaceBlockRecords();
   std::set<std::string> seen;
   for (const auto &layout : metadata.layouts()) {
-    if (layout.replayState !=
-        LC_DwgAdvancedMetadata::ReplayState::ReplayAllowed)
+    if (!writesLayoutObject(layout, version, dwg))
       continue;
     const auto space = spaces.find(layout.paperSpaceBlockRecordHandle);
     if (space == spaces.end())
@@ -13524,11 +13589,20 @@ int writtenVersionOf(const RS2::FormatType format) {
 }
 } // namespace
 
+bool RS_FilterDXFRW::writingDwg() const {
+#ifdef DWGSUPPORT
+  return m_dwgW != nullptr;
+#else
+  return false;
+#endif
+}
+
 std::vector<std::string> RS_FilterDXFRW::dxfExtraPaperSpaceNames() const {
   std::vector<std::string> names;
   if (m_graphic == nullptr)
     return names;
-  for (const auto &[name, layout] : numberedLayoutSpaces(*m_graphic, m_version)) {
+  for (const auto &[name, layout] :
+       numberedLayoutSpaces(*m_graphic, m_version, writingDwg())) {
     // A DXF lists its layouts in a dictionary. A *Paper_SpaceN block whose
     // layout no written dictionary lists is an orphan, which a reader drops
     // with its content: the layout is left out instead, and said to be.
@@ -13538,6 +13612,24 @@ std::vector<std::string> RS_FilterDXFRW::dxfExtraPaperSpaceNames() const {
     names.push_back(name);
   }
   return names;
+}
+
+bool RS_FilterDXFRW::writesLayout(
+    const LC_DwgAdvancedMetadata::LayoutRecord &layout) const {
+  if (m_graphic == nullptr ||
+      !writesLayoutObject(layout, m_version, writingDwg()))
+    return false;
+  // A LAYOUT whose numbered paper space is not written would name a block
+  // record the file does not have; a reader refuses the file for it.
+  const QString numbered =
+      numberedPaperSpaceOf(m_graphic->dwgAdvancedMetadata(), layout);
+  if (numbered.isEmpty())
+    return true;
+  for (const std::string &name : dxfExtraPaperSpaceNames()) {
+    if (QString::fromUtf8(name.c_str()).compare(numbered, Qt::CaseInsensitive) == 0)
+      return true;
+  }
+  return false;
 }
 
 RS_EntityContainer *
@@ -13598,9 +13690,12 @@ QString RS_FilterDXFRW::exportLeavesOut(const RS_Graphic &graphic,
   const int version = writtenVersionOf(type);
   if (version == 0)
     return {};
+  const bool dwg = type == RS2::FormatDWG || type == RS2::FormatDWG2004 ||
+                   type == RS2::FormatDWG2007 || type == RS2::FormatDWG2010 ||
+                   type == RS2::FormatDWG2013 || type == RS2::FormatDWG2018;
   const auto &metadata = graphic.dwgAdvancedMetadata();
   std::set<QString> kept;
-  for (const auto &[name, layout] : numberedLayoutSpaces(graphic, version))
+  for (const auto &[name, layout] : numberedLayoutSpaces(graphic, version, dwg))
     kept.insert(QString::fromUtf8(name.c_str()).toLower());
   unsigned leftOut = 0;
   QStringList layouts;
@@ -13917,7 +14012,8 @@ RS_FilterDXFRW::dwgPaperSpaceBlocks() const {
 #ifdef DWGSUPPORT
   if (m_dwgW == nullptr || m_graphic == nullptr)
     return blocks;
-  for (const auto &[name, layout] : numberedLayoutSpaces(*m_graphic, m_version)) {
+  for (const auto &[name, layout] :
+       numberedLayoutSpaces(*m_graphic, m_version, true)) {
     // The store has no container for a layout that holds nothing; its
     // record is written all the same, empty.
     RS_EntityContainer *entities =
@@ -24008,11 +24104,10 @@ void RS_FilterDXFRW::writeObjects() {
         }
       }
       for (const auto &record : metadata.layouts()) {
-        if (record.replayState ==
-                LC_DwgAdvancedMetadata::ReplayState::ReplayAllowed &&
-            record.handle != 0) {
+        // Only a LAYOUT the writer takes, with its paper space
+        // (writesLayout()): a reference to another is dropped.
+        if (writesLayout(record))
           nativeLayoutHandles.insert(record.handle);
-        }
       }
     }
     if (canRegisterCustomClassObjects && m_dwgW->getVersion() <= DRW::AC1021) {
@@ -27682,9 +27777,12 @@ void RS_FilterDXFRW::writeObjects() {
     }
     // LAYOUT is a fixed built-in object. It is typed metadata only on DXF
     // read too, so emit it here and let the prepass materialize ACAD_LAYOUT
-    // when the source had a reachable layout dictionary.
+    // when the source had a reachable layout dictionary. An R12 or R14 file
+    // has none, and a LAYOUT whose numbered paper space is not written would
+    // name a block record the file does not have (writesLayout()).
     for (const auto &record : metadata.layouts()) {
-      if (!emitTyped(record.handle, record.replayState))
+      if (!emitTyped(record.handle, record.replayState) ||
+          !writesLayout(record))
         continue;
       DRW_Layout layout = layoutFromMetadata(record);
       layout.handle = m_dxfW->remapHandle(layout.handle);

@@ -815,6 +815,149 @@ TEST_CASE("A paper-space POLYLINE's VERTEX and SEQEND records are of the paper s
     CHECK(sequenceEnds == 1);
 }
 
+namespace {
+// The LAYOUT records of a written DXF, by name, with the handle of each and
+// of the block record it names (its last 330), and the BLOCK_RECORDs by
+// handle, with their name and the LAYOUT they point back at (340).
+struct WrittenLayouts {
+    struct Layout {
+        std::string handle;
+        std::string blockRecord;
+    };
+    struct BlockRecord {
+        std::string name;
+        std::string layout;
+    };
+    std::map<std::string, Layout> layouts;
+    std::map<std::string, BlockRecord> blockRecords;
+};
+
+WrittenLayouts writtenLayouts(const std::filesystem::path& file) {
+    WrittenLayouts written;
+    for (const DxfRecord& record : lc::test::dxfRecords(file)) {
+        const auto handles = record.own(5);
+        if (handles.empty())
+            continue;
+        if (record.type() == "LAYOUT") {
+            const auto names = record.own(1);
+            const auto pointers = record.own(330);
+            written.layouts[names.empty() ? std::string() : names.back()] = {
+                handles.front(), pointers.empty() ? std::string() : pointers.back()};
+        } else if (record.type() == "BLOCK_RECORD") {
+            const auto names = record.own(2);
+            const auto layouts = record.own(340);
+            written.blockRecords[handles.front()] = {
+                names.empty() ? std::string() : names.front(),
+                layouts.empty() ? std::string() : layouts.front()};
+        }
+    }
+    return written;
+}
+} // namespace
+
+TEST_CASE("An R12 or R14 DXF holds no LAYOUT, and a LAYOUT names a block record written",
+          "[dxf][paper-space]") {
+    REQUIRE(lc::test::ensureSettings());
+    lc::test::QuietLog quiet;
+    lc::test::OutputDirectory directory("lc_dxf_paper_space_r14_layouts");
+    const auto source = directory.file("layouts_r2000.dxf");
+    writeText(source, layoutsDxf());
+    RS_Graphic graphic;
+    REQUIRE(lc::test::importDrawing(graphic, source, RS2::FormatDXFRW));
+
+    // LAYOUT is an R2000 object: an R14 file that held one would name the
+    // *Paper_Space0 block record it does not have, and a reader refuses it.
+    const auto r14 = directory.file("saved_r14.dxf");
+    RS_FilterDXFRW writer;
+    REQUIRE(writer.fileExport(graphic, lc::test::toQString(r14), RS2::FormatDXFRW14));
+    CHECK(writer.exportReport().contains(QStringLiteral("2 object(s) on paper-space layouts")));
+    const WrittenLayouts inR14 = writtenLayouts(r14);
+    CHECK(inR14.layouts.empty());
+    CHECK(lc::test::fileBytes(r14).find("ACAD_LAYOUT") == std::string::npos);
+
+    // In R2000 and later, each LAYOUT names a block record written.
+    for (const RS2::FormatType format : {RS2::FormatDXFRW2000, RS2::FormatDXFRW2018}) {
+        CAPTURE(static_cast<int>(format));
+        const auto saved = directory.file("saved_" + std::to_string(static_cast<int>(format)) + ".dxf");
+        RS_FilterDXFRW modern;
+        REQUIRE(modern.fileExport(graphic, lc::test::toQString(saved), format));
+        const WrittenLayouts written = writtenLayouts(saved);
+        REQUIRE(written.layouts.size() == 3);
+        for (const auto& [name, layout] : written.layouts) {
+            CAPTURE(name);
+            const auto record = written.blockRecords.find(layout.blockRecord);
+            CHECK(record != written.blockRecords.end());
+        }
+        CHECK(written.blockRecords.at(written.layouts.at("Model").blockRecord).name == "*Model_Space");
+        CHECK(written.blockRecords.at(written.layouts.at("Layout1").blockRecord).name == "*Paper_Space");
+        CHECK(written.blockRecords.at(written.layouts.at("Layout2").blockRecord).name == "*Paper_Space0");
+    }
+}
+
+TEST_CASE("A LAYOUT whose paper space is not written is not written either",
+          "[dxf][paper-space]") {
+    REQUIRE(lc::test::ensureSettings());
+    lc::test::QuietLog quiet;
+    lc::test::OutputDirectory directory("lc_dxf_paper_space_layout_without_space");
+    // The LAYOUTs are owned by a dictionary the file does not have, so no
+    // dictionary written lists them: Layout2's *Paper_Space0 is not written,
+    // and its LAYOUT, which would name it, is not either.
+    std::string text = layoutsDxf();
+    const std::string owned = "330\n1A\n100\nAcDbPlotSettings";
+    for (std::size_t at = text.find(owned); at != std::string::npos; at = text.find(owned, at))
+        text.replace(at, 7, "330\n99\n");
+    const auto source = directory.file("orphan_layouts.dxf");
+    writeText(source, text);
+    RS_Graphic graphic;
+    REQUIRE(lc::test::importDrawing(graphic, source, RS2::FormatDXFRW));
+    REQUIRE(paperSpaceCount(graphic, QStringLiteral("*Paper_Space0")) == 2);
+
+    const auto saved = directory.file("saved_r2018.dxf");
+    RS_FilterDXFRW writer;
+    REQUIRE(writer.fileExport(graphic, lc::test::toQString(saved), RS2::FormatDXFRW2018));
+    CHECK(writer.exportReport().contains(QStringLiteral("2 object(s) on paper-space layouts")));
+    const WrittenLayouts written = writtenLayouts(saved);
+    CHECK(written.layouts.count("Layout2") == 0);
+    CHECK(written.layouts.count("Layout1") == 1);
+    for (const auto& [name, layout] : written.layouts) {
+        CAPTURE(name);
+        CHECK(written.blockRecords.count(layout.blockRecord) == 1);
+    }
+}
+
+TEST_CASE("A layout a DWG cannot write is left out of a DWG save, and known to be before it",
+          "[dxf][dwg][paper-space]") {
+    REQUIRE(lc::test::ensureSettings());
+    lc::test::QuietLog quiet;
+    lc::test::OutputDirectory directory("lc_dxf_paper_space_dwg_rejected_layout");
+    // Layout2's LAYOUT carries application data of its own, which a DWG
+    // LAYOUT cannot hold: a DWG save writes neither it nor its paper space.
+    std::string text = layoutsDxf();
+    const std::string layout2 = "0\nLAYOUT\n5\n41\n";
+    const auto at = text.find(layout2);
+    REQUIRE(at != std::string::npos);
+    text.insert(at + layout2.size(), "102\n{MY_APPLICATION\n1000\nkept\n102\n}\n");
+    const auto source = directory.file("app_data.dxf");
+    writeText(source, text);
+    RS_Graphic graphic;
+    REQUIRE(lc::test::importDrawing(graphic, source, RS2::FormatDXFRW));
+    REQUIRE(paperSpaceCount(graphic, QStringLiteral("*Paper_Space0")) == 2);
+
+    RS_FilterDXFRW filter;
+    CHECK(filter.exportLeavesOut(graphic, RS2::FormatDXFRW2018).isEmpty());
+    CHECK(filter.exportLeavesOut(graphic, RS2::FormatDWG2018) ==
+          QStringLiteral("2 object(s) on paper-space layouts (Layout2)"));
+
+    const auto saved = directory.file("saved_r2018.dwg");
+    RS_FilterDXFRW writer;
+    REQUIRE(writer.fileExport(graphic, lc::test::toQString(saved), RS2::FormatDWG2018));
+    CHECK(writer.exportReport().contains(QStringLiteral("2 object(s) on paper-space layouts")));
+    RS_Graphic reopened;
+    REQUIRE(lc::test::importDrawing(reopened, saved, RS2::FormatDWG));
+    CHECK(paperSpaceCount(reopened, QStringLiteral("*Paper_Space")) == 3);
+    CHECK(paperSpaceCount(reopened, QStringLiteral("*Paper_Space0")) == 0);
+}
+
 // Converts one drawing for a look with another program:
 //   LC_PAPER_SPACE_IN=<.dxf|.dwg> LC_PAPER_SPACE_OUT=<.dxf|.dwg> \
 //   [LC_PAPER_SPACE_VERSION=r12|r14|r2000|r2007|r2018|dwg2000|...|dwg2018] \

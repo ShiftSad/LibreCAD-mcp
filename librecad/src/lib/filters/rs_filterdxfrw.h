@@ -2332,6 +2332,12 @@ public:
   /** Numbered paper spaces (*Paper_Space0, ...) the written layouts need,
    *  in a DXF or a DWG. */
   std::vector<std::string> dxfExtraPaperSpaceNames() const;
+  /** Whether the export in progress writes a DWG. */
+  bool writingDwg() const;
+  /** Whether the save in progress writes the LAYOUT of @p layout: an R2000
+   *  or later object the writer takes, whose numbered paper space, if it has
+   *  one, is written too. */
+  bool writesLayout(const LC_DwgAdvancedMetadata::LayoutRecord &layout) const;
   /** The entities of the layout whose paper space is named @p name, when the
    *  save in progress writes them: the active layout's into a DXF's ENTITIES
    *  with group 67 or a DWG's *Paper_Space, another's into its
