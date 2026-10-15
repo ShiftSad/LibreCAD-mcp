@@ -45,7 +45,7 @@
  */
 struct LC_RouteOptions {
     QString capability; QString summary;   // capability: reported by /status and /routes; summary: one line for /routes
-    bool gui = true;              // run handler via LC_RemoteApiGui::run
+    bool gui = true;              // run handler via LC_RemoteApiGui::run (forced on by needsDocument/changesDocument)
     bool changesDocument = false; // cancel active action (unless keepActiveAction), audit line, refuse on user modal
     bool keepActiveAction = false;
     bool needsDocument = false;   // resolve ?doc before handler (409 no_document / 404 unknown_document)
