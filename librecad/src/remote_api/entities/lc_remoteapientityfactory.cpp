@@ -450,14 +450,41 @@ HatchParams readHatch(const LC_JsonReader& r, const QString& path) {
     return p;
 }
 
-/** validate(), update() and the update error of a hatch with its loops. */
-void finishHatch(RS_Hatch* hatch, const QString& path) {
-    if (!hatch->validate()) {
+/**
+ * validate(), update() and the update error of a hatch with its loops. A PATCH
+ * passes the error the hatch had before (read from a file, it may name a
+ * pattern LibreCAD has no definition of): that one is no error of the request,
+ * unless the request changed what it is about.
+ */
+void finishHatch(RS_Hatch* hatch, const QString& path, const RS_Hatch::RS_HatchError before = RS_Hatch::HATCH_OK,
+                 const bool patternChanged = true, const bool scaleChanged = true) {
+    const bool validated = hatch->validate();
+    if (validated) {
+        hatch->update();
+    }
+    const RS_Hatch::RS_HatchError error = validated ? hatch->getUpdateError() : RS_Hatch::HATCH_INVALID_CONTOUR;
+    if (error != RS_Hatch::HATCH_OK && error == before) {
+        bool caused = false;
+        switch (error) {
+            case RS_Hatch::HATCH_PATTERN_NOT_FOUND:
+                caused = patternChanged;
+                break;
+            case RS_Hatch::HATCH_TOO_SMALL:
+            case RS_Hatch::HATCH_AREA_TOO_BIG:
+                caused = patternChanged || scaleChanged;
+                break;
+            default:
+                break;
+        }
+        if (!caused) {
+            return; // as it was
+        }
+    }
+    if (!validated) {
         throw LC_ApiError(422, QStringLiteral("invalid_hatch_boundary"), QStringLiteral("the hatch boundary is not a valid closed contour"),
                           {{QStringLiteral("param"), path}});
     }
-    hatch->update();
-    switch (hatch->getUpdateError()) {
+    switch (error) {
         case RS_Hatch::HATCH_OK:
             return;
         case RS_Hatch::HATCH_PATTERN_NOT_FOUND:
@@ -945,16 +972,42 @@ std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::patch(RS_Entity* original,
         return clone;
     }
     if (type == QLatin1String("hatch")) {
-        const HatchParams p = readHatch(r, QString());
+        // Only what the body names is read and checked: a hatch read from a file
+        // keeps a pattern LibreCAD has no definition of, or the scale 0 of a solid
+        // fill, while another field changes.
         std::unique_ptr<RS_Entity> clone(original->clone());
         auto* hatch = static_cast<RS_Hatch*>(clone.get());
-        hatch->setSolid(p.solid);
-        hatch->setPattern(p.pattern);
-        hatch->setScale(p.scale);
-        if (given("angle_deg")) {
-            hatch->setAngle(p.angle);
+        const RS_Hatch::RS_HatchError before = hatch->getUpdateError();
+        bool patternChanged = false;
+        if (given("pattern")) {
+            QString pattern = r.str("pattern").trimmed();
+            if (pattern.isEmpty()) {
+                json::throwInvalidEntity(QStringLiteral("pattern"), QStringLiteral("must name a hatch pattern"));
+            }
+            const bool solid = pattern.compare(QLatin1String("SOLID"), Qt::CaseInsensitive) == 0;
+            if (solid) {
+                pattern = QStringLiteral("SOLID");
+            }
+            patternChanged = solid != hatch->isSolid() || (!solid && pattern.compare(hatch->getPattern(), Qt::CaseInsensitive) != 0);
+            if (patternChanged) { // the same pattern keeps its spelling
+                hatch->setSolid(solid);
+                hatch->setPattern(pattern);
+            }
         }
-        finishHatch(hatch, QString());
+        // the scale as GET reports it (0 for a solid fill from some files) is no change
+        const bool scaleChanged = given("scale") && r.num("scale") != hatch->getScale();
+        if (scaleChanged) {
+            hatch->setScale(positive(r, "scale", 1.0, QString()));
+        }
+        else if (patternChanged && !hatch->isSolid() && !(hatch->getScale() > 0.0)) {
+            json::throwInvalidEntity(QStringLiteral("scale"),
+                                     QStringLiteral("this hatch has scale %1 (a solid fill ignores it): give a scale > 0 with the pattern")
+                                         .arg(hatch->getScale()));
+        }
+        if (given("angle_deg")) {
+            hatch->setAngle(radians(r.num("angle_deg")));
+        }
+        finishHatch(hatch, QString(), before, patternChanged, scaleChanged);
         return clone;
     }
     if (type == QLatin1String("dimension")) {
@@ -1012,8 +1065,18 @@ std::unique_ptr<RS_Entity> LC_RemoteApiEntityFactory::patch(RS_Entity* original,
         }
     }
 
-    const bool angular = original->rtti() == RS2::EntityDimAngular;
-    std::unique_ptr<RS_Entity> fresh = createEntity(merged, QString(), warnings, angular);
+    // An angular dimension keeps the order of its points (file semantics, as an
+    // imported one has them) only while its definition is the one GET reports:
+    // a new line or arc_point measures the sector that holds arc_point, as POST does.
+    bool keepAngularOrder = false;
+    if (original->rtti() == RS2::EntityDimAngular) {
+        const QJsonObject before = json::geometryFields(original);
+        keepAngularOrder = true;
+        for (const char* key : {"line1", "line2", "arc_point"}) {
+            keepAngularOrder = keepAngularOrder && merged.value(QLatin1String(key)) == before.value(QLatin1String(key));
+        }
+    }
+    std::unique_ptr<RS_Entity> fresh = createEntity(merged, QString(), warnings, keepAngularOrder);
     transplantIdentity(original, fresh.get());
     // Angles the body does not name keep their exact value: the merged degrees
     // went through a conversion and back.
