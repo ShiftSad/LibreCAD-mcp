@@ -14,7 +14,8 @@
 > Downloads: [releases of this fork](https://github.com/ShiftSad/LibreCAD-mcp/releases).
 > Problems with this fork go to [its issues](https://github.com/ShiftSad/LibreCAD-mcp/issues),
 > not upstream's. More: [Remote API design](docs/remote-api/DESIGN.md) ·
-> [keeping in sync with upstream](UPSTREAM_SYNC.md). Everything below this box is upstream
+> [keeping in sync with upstream](UPSTREAM_SYNC.md) ·
+> [known limitations](docs/FORK_KNOWN_LIMITATIONS.md). Everything below this box is upstream
 > LibreCAD's README.
 
 [→ **Download** ←](https://github.com/LibreCAD/LibreCAD/wiki/Download)
