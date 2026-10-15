@@ -26,6 +26,8 @@
 
 #include "console_command_utils.h"
 
+#include <iostream>
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -287,8 +289,11 @@ bool validateOutputTargets(const QStringList& inputFiles, const QStringList& out
 }
 
 bool importGraphic(RS_Graphic& graphic, const QString& inputFile, RS2::FormatType type) {
+    // What the import says goes to stderr, whatever the Qt message handler
+    // or logging rules let through.
     if (!QFileInfo::exists(inputFile)) {
-        qCritical("ERROR: input file does not exist: '%s'", qPrintable(inputFile));
+        std::cerr << "ERROR: input file does not exist: '" << inputFile.toStdString() << "'"
+                  << std::endl;
         return false;
     }
 
@@ -303,19 +308,19 @@ bool importGraphic(RS_Graphic& graphic, const QString& inputFile, RS2::FormatTyp
         [&reported, &inputFile](bool partial, const QString& error) {
             reported = true;
             if (partial) {
-                qWarning("WARNING: partial import of '%s': %s",
-                         qPrintable(inputFile), qPrintable(error));
+                std::cerr << "WARNING: partial import of '" << inputFile.toStdString()
+                          << "': " << error.toStdString() << std::endl;
                 return true;
             }
-            qCritical("ERROR: import failed for '%s': %s",
-                      qPrintable(inputFile), qPrintable(error));
+            std::cerr << "ERROR: import failed for '" << inputFile.toStdString()
+                      << "': " << error.toStdString() << std::endl;
             return false;
         });
 
     if (!imported) {
         // the format was not recognised, so the import never reached a filter
         if (!reported)
-            qCritical("ERROR: cannot read '%s'", qPrintable(inputFile));
+            std::cerr << "ERROR: cannot read '" << inputFile.toStdString() << "'" << std::endl;
         return false;
     }
 

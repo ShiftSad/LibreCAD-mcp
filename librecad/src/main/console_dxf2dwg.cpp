@@ -65,7 +65,12 @@ bool convertFile(const QString& inputFile, const QString& outputFile, RS2::Forma
         return false;
 
     if (!RS_FileIO::instance()->fileExport(graphic, outputFile, outFmt)) {
-        qCritical("ERROR: failed to export '%s'", qPrintable(outputFile));
+        // On stderr, whatever the Qt message handler or logging rules let
+        // through, with the reason when the filter can tell it.
+        const QString reason = RS_FileIO::instance()->lastExportError();
+        std::cerr << "ERROR: failed to export '" << outputFile.toStdString() << "'"
+                  << (reason.isEmpty() ? std::string() : ": " + reason.toStdString())
+                  << std::endl;
         return false;
     }
     // What the file could not hold; the export itself went through. On
@@ -151,10 +156,11 @@ int runDwgAdmissionReport(int argc, char** argv) {
             graphic, input, RS2::FormatDWG,
             [](bool partial, const QString& error) {
                 if (partial) {
-                    qWarning("WARNING: partial import: %s", qPrintable(error));
+                    std::cerr << "WARNING: partial import: " << error.toStdString()
+                              << std::endl;
                     return true;
                 }
-                qCritical("ERROR: import failed: %s", qPrintable(error));
+                std::cerr << "ERROR: import failed: " << error.toStdString() << std::endl;
                 return false;
             })) {
         return EXIT_FAILURE;

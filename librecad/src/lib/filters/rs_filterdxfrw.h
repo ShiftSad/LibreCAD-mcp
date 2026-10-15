@@ -2016,6 +2016,7 @@ public:
   // Error messages
   QString lastError() const override;
   QString exportReport() const override;
+  QString exportError() const override;
   QString exportLeavesOut(const RS_Graphic &graphic,
                           RS2::FormatType type) const override;
 

@@ -214,6 +214,7 @@ bool RS_FileIO::fileExport(RS_Graphic& graphic, const QString& file, RS2::Format
     }
 
     m_lastExportReport.clear();
+    m_lastExportError.clear();
     if (graphic.isDxfRecoverySourceFile(file)) {
         m_lastExportReport = QObject::tr("The original legacy DXF is protected. Save the recovered drawing to a different file.");
         RS_DIALOGFACTORY->commandMessage(m_lastExportReport);
@@ -223,6 +224,9 @@ bool RS_FileIO::fileExport(RS_Graphic& graphic, const QString& file, RS2::Format
     if (filter) {
         const bool exported = filter->fileExport(graphic, file, type);
         m_lastExportReport = filter->exportReport();
+        if (!exported) {
+            m_lastExportError = filter->exportError();
+        }
         return exported;
     }
     RS_DEBUG->print("RS_FileIO::fileExport: no filter found");

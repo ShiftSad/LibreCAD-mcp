@@ -119,6 +119,13 @@ public:
     }
 
     /**
+     * Why the last export failed, when the filter can tell; empty otherwise.
+     */
+    virtual QString exportError() const {
+        return {};
+    }
+
+    /**
      * Request the error code for the last import/export action.
      * The default value 0 means no error.
      */

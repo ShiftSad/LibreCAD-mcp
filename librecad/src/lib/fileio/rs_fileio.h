@@ -63,6 +63,9 @@ public:
     bool fileExport(RS_Graphic& graphic, const QString& file, RS2::FormatType type = RS2::FormatUnknown) const;
     /** What the last fileExport() left out, one item per line (RS_FilterInterface::exportReport). */
     QString lastExportReport() const { return m_lastExportReport; }
+    /** Why the last fileExport() failed, when the filter could tell
+     *  (RS_FilterInterface::exportError); empty otherwise. */
+    QString lastExportError() const { return m_lastExportError; }
     /**
      * @return true if LibreCAD can write files in format @p type;
      *         false for RS2::FormatUnknown.
@@ -83,6 +86,7 @@ private:
     static std::vector<std::function<RS_FilterInterface*()>> getFilters();
 
     mutable QString m_lastExportReport;
+    mutable QString m_lastExportError;
 
     //singleton
     RS_FileIO() = default;

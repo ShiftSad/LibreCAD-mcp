@@ -17845,6 +17845,23 @@ QString RS_FilterDXFRW::exportReport() const {
   return lines.join(QLatin1Char('\n'));
 }
 
+QString RS_FilterDXFRW::exportError() const {
+#ifdef DWGSUPPORT
+  // What the DWG export admission refused, if that stopped the export.
+  QStringList refused;
+  for (const QString &row :
+       dwgExportAdmissionReport().split(QLatin1Char('\n'))) {
+    if (row.contains(QStringLiteral(" policy=refuse ")))
+      refused << row;
+  }
+  if (!refused.isEmpty()) {
+    return QObject::tr("DWG export admission refused: %1", "RS_FilterDXFRW")
+        .arg(refused.join(QStringLiteral("; ")));
+  }
+#endif
+  return m_errorCode != DRW::BAD_NONE ? lastError() : QString();
+}
+
 RS2::FormatType RS_FilterDXFRW::formatForDxfVersion(const DRW::Version version) {
   switch (version) {
   case DRW::AC1012:
