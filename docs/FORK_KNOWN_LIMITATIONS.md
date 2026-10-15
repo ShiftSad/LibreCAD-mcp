@@ -15,7 +15,8 @@ it. On top of upstream master this fork:
   (AutoCAD writes such entries, for example `ACAD_PARALLEL_BACKGROUND`);
 - reads the CLASSES section CRC of R2007+ files at the right place (the spurious CRC warning on
   every 2007-2026 DWG is gone);
-- decodes the CELLSTYLEMAP objects of R13-R2004 files.
+- decodes the CELLSTYLEMAP objects of R13-R2004 files;
+- ships the `LINE` and `ANSI37` hatch patterns.
 
 Limits that remain:
 
@@ -36,8 +37,10 @@ Limits that remain:
   the same). LibreDWG-based tools may then lose the layouts of such a file. DWG 2000/2004 output
   and DXF output are not affected.
 - **OLE frames are not written to DWG**; the save report lists them.
-- **Hatch patterns LibreCAD does not ship** (for example `LINE` and `ANSI37`) cannot be drawn
-  with their pattern.
+- **Hatch pattern density can differ from AutoCAD's** (upstream does the same): LibreCAD's
+  pattern library is not drawn at AutoCAD's pattern scale. This fork adds `LINE` and `ANSI37`,
+  which AutoCAD drawings use often, at the density of LibreCAD's `ANSI31`. A hatch whose pattern
+  LibreCAD does not have is still not drawn.
 
 ## Remote API and `librecad-mcp`
 
