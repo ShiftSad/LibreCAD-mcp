@@ -89,9 +89,9 @@ def _is_device_namespace(p: str) -> bool:
 
 
 def _is_device_name(name: str) -> bool:
-    """``COM1.dxf``, ``nul.svg``, ``COM1 .dxf``: the part before the first dot, without trailing
-    spaces and dots, as Windows reads it."""
-    return name.split(".")[0].rstrip(" .").upper() in _WINDOWS_DEVICE_NAMES
+    """``COM1.dxf``, ``nul.svg``, ``COM1 .dxf``, `` COM1.dxf``: the part before the first dot, without
+    the spaces around it, as LibreCAD judges it (Windows itself drops only the trailing ones)."""
+    return name.split(".")[0].strip().upper() in _WINDOWS_DEVICE_NAMES
 
 
 def file_name_encoding() -> str:

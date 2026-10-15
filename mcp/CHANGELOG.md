@@ -32,6 +32,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   to Windows in that code page, which turns a full-width `＼` into `\` (a path out of
   `LIBRECAD_MCP_ALLOWED_ROOTS`) and `ł` into `l` (another file). PDF, PNG and SVG exports take any
   name.
+- A device name with spaces before it (` COM1.dxf`) is refused too, as LibreCAD refuses it.
 
 ### Changed
 - Every request tells LibreCAD the client's deadline (`X-Request-Timeout-Ms`, a whole number of ms,

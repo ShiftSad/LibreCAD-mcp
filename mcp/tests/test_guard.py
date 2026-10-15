@@ -40,6 +40,7 @@ def test_windows_path_is_normalized():
     ("C:\\a\\COM\u00b9.dxf", "bad_path"),         # superscript digits are reserved like plain ones
     ("C:\\a\\lpt\u00b3.dxf", "bad_path"),
     (r"C:\a\COM1 .dxf", "bad_path"),            # trailing spaces and dots do not hide a device
+    (r"C:\a\ COM1.dxf", "bad_path"),            # nor leading spaces, as LibreCAD trims both ends
     (r"C:\a\nul..dxf", "bad_path"),
     ("", "bad_path"),
     ("${user_config.path}", "bad_path"),
