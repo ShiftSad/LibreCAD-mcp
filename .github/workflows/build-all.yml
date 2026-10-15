@@ -3,6 +3,9 @@ on:
   push:
     branches:
       - master
+    # librecad-mcp: also build the fork's release tags (v<LibreCAD version>-mcp.<N>)
+    tags:
+      - 'v*-mcp.*'
   # The macOS packaging scripts only run here, so check them before they
   # reach master. Only BuildMacOS runs for a pull request.
   pull_request:
@@ -72,7 +75,7 @@ jobs:
         id: artifact-upload-step
         uses: actions/upload-artifact@main
         with:
-          name: linuxAssets
+          name: LibreCAD-mcp_linux-x86_64   # librecad-mcp: was linuxAssets
           path: |
             LibreCAD*.AppImage
             LibreCAD*.AppImage.zsync
@@ -138,7 +141,7 @@ jobs:
         id: artifact-upload-step
         uses: actions/upload-artifact@main
         with:
-          name: linuxAssetsAarch64
+          name: LibreCAD-mcp_linux-aarch64   # librecad-mcp: was linuxAssetsAarch64
           path: |
             LibreCAD*.AppImage
             LibreCAD*.AppImage.zsync
@@ -168,12 +171,12 @@ jobs:
           ls
           ls scripts
           bash ./scripts/createSnap.sh
-          mv librecad*.snap LibreCAD-`git describe --always`.snap
+          mv librecad*.snap LibreCAD-mcp-`git describe --always`.snap   # librecad-mcp: file name
 
       - name: Uploading snap
         uses: actions/upload-artifact@v4
         with:
-          name: snapAssets
+          name: LibreCAD-mcp_snap   # librecad-mcp: was snapAssets
           path: ${{github.workspace}}/LibreCAD*.snap
           retention-days: 2
 
@@ -223,7 +226,7 @@ jobs:
         env:
           QMAKE_OPTS: QMAKE_APPLE_DEVICE_ARCHS=arm64 QMAKE_APPLE_DEVICE_ARCHS+=x86_64
         run: |
-          DMG_NAME="LibreCAD-$(git describe --always)-universal.dmg"
+          DMG_NAME="LibreCAD-mcp-$(git describe --always)-universal.dmg"   # librecad-mcp: file name
           scripts/build-osx.sh \
             --sign-mode=adhoc \
             --architectures=arm64,x86_64 \
@@ -246,7 +249,7 @@ jobs:
         id: artifact-upload-step
         uses: actions/upload-artifact@main
         with:
-          name: macOSAssets
+          name: LibreCAD-mcp_macos-universal   # librecad-mcp: was macOSAssets
           path: |
             LibreCAD*.dmg
             LibreCAD*.dmg.sha256
@@ -361,15 +364,26 @@ jobs:
 
       - name: Rename installer
         run: |
-          mv generated/LibreCAD-*.exe LibreCAD-`git describe --always`-win-x64.exe
+          mv generated/LibreCAD-*.exe LibreCAD-mcp-`git describe --always`-win-x64.exe   # librecad-mcp: file name
         shell: bash
+
+      # librecad-mcp: a portable zip with the installer's layout, and SHA256SUMS for both
+      - name: Portable zip and SHA256SUMS
+        run: |
+          $version = (git describe --always).Trim()
+          ./CI/package-windows-portable.ps1 -Arch x64 -Version $version -Source windows `
+            -Installer "LibreCAD-mcp-$version-win-x64.exe" -OutDir .
+        shell: pwsh
 
       - name: Upload artifact
         id: artifact-upload-step
         uses: actions/upload-artifact@main
         with:
-          name: win64Assets
-          path: LibreCAD*.exe
+          name: LibreCAD-mcp_win-x64   # librecad-mcp: was win64Assets
+          path: |
+            LibreCAD*.exe
+            LibreCAD*-portable.zip
+            SHA256SUMS-win-x64.txt
           retention-days: 2
 
   BuildWindowsARM64:
@@ -478,15 +492,26 @@ jobs:
 
       - name: Rename installer
         run: |
-          mv generated/LibreCAD-*.exe LibreCAD-`git describe --always`-win-arm64.exe
+          mv generated/LibreCAD-*.exe LibreCAD-mcp-`git describe --always`-win-arm64.exe   # librecad-mcp: file name
         shell: bash
+
+      # librecad-mcp: a portable zip with the installer's layout, and SHA256SUMS for both
+      - name: Portable zip and SHA256SUMS
+        run: |
+          $version = (git describe --always).Trim()
+          ./CI/package-windows-portable.ps1 -Arch arm64 -Version $version -Source windows `
+            -Installer "LibreCAD-mcp-$version-win-arm64.exe" -OutDir .
+        shell: pwsh
 
       - name: Upload artifact
         id: artifact-upload-step
         uses: actions/upload-artifact@main
         with:
-          name: winARM64Assets
-          path: LibreCAD*.exe
+          name: LibreCAD-mcp_win-arm64   # librecad-mcp: was winARM64Assets
+          path: |
+            LibreCAD*.exe
+            LibreCAD*-portable.zip
+            SHA256SUMS-win-arm64.txt
           retention-days: 2
 
   UpdateAssets:
@@ -590,18 +615,23 @@ jobs:
           draft: false
           make_latest: false
           body_path: release-notes.md
+          # librecad-mcp: artifact folders renamed to LibreCAD-mcp_*
           files: |
-            linuxAssets/LibreCAD*.AppImage
-            linuxAssets/LibreCAD*.AppImage.zsync
-            linuxAssetsAarch64/LibreCAD*.AppImage
-            linuxAssetsAarch64/LibreCAD*.AppImage.zsync
-            macOSAssets/LibreCAD*.dmg
-            macOSAssets/LibreCAD*.dmg.sha256
-            macOSAssets/LibreCAD*.dmg.verification.txt
-            macOSAssets/LibreCAD*.dmg.app.manifest
-            win64Assets/LibreCAD*.exe
-            winARM64Assets/LibreCAD*.exe
-            snapAssets/LibreCAD*.snap
+            LibreCAD-mcp_linux-x86_64/LibreCAD*.AppImage
+            LibreCAD-mcp_linux-x86_64/LibreCAD*.AppImage.zsync
+            LibreCAD-mcp_linux-aarch64/LibreCAD*.AppImage
+            LibreCAD-mcp_linux-aarch64/LibreCAD*.AppImage.zsync
+            LibreCAD-mcp_macos-universal/LibreCAD*.dmg
+            LibreCAD-mcp_macos-universal/LibreCAD*.dmg.sha256
+            LibreCAD-mcp_macos-universal/LibreCAD*.dmg.verification.txt
+            LibreCAD-mcp_macos-universal/LibreCAD*.dmg.app.manifest
+            LibreCAD-mcp_win-x64/LibreCAD*.exe
+            LibreCAD-mcp_win-x64/LibreCAD*-portable.zip
+            LibreCAD-mcp_win-x64/SHA256SUMS-win-x64.txt
+            LibreCAD-mcp_win-arm64/LibreCAD*.exe
+            LibreCAD-mcp_win-arm64/LibreCAD*-portable.zip
+            LibreCAD-mcp_win-arm64/SHA256SUMS-win-arm64.txt
+            LibreCAD-mcp_snap/LibreCAD*.snap
             LICENSE
 
       - name: Remove assets of older builds
@@ -612,7 +642,8 @@ jobs:
           # Everything this run downloaded from the build jobs, plus LICENSE:
           # whatever the release holds beyond that came from an older build.
           : > uploaded.txt
-          for dir in linuxAssets linuxAssetsAarch64 macOSAssets win64Assets winARM64Assets snapAssets; do
+          # librecad-mcp: artifact folders renamed to LibreCAD-mcp_*
+          for dir in LibreCAD-mcp_linux-x86_64 LibreCAD-mcp_linux-aarch64 LibreCAD-mcp_macos-universal                      LibreCAD-mcp_win-x64 LibreCAD-mcp_win-arm64 LibreCAD-mcp_snap; do
             [ -d "$dir" ] || continue
             find "$dir" -maxdepth 1 -type f -exec basename {} ';' >> uploaded.txt
           done
