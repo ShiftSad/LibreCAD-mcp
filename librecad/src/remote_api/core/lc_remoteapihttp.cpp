@@ -92,9 +92,30 @@ LC_HttpRequestParser::State LC_HttpRequestParser::feed(const QByteArrayView data
     m_buffer.append(data);
 
     if (!m_headersDone) {
+        // RFC 9112 2.2: empty lines (CRLF) before the request line are ignored
+        // (they count toward the header limit)
+        qsizetype empty = 0;
+        while (empty + 1 < m_buffer.size() && m_buffer.at(empty) == '\r' && m_buffer.at(empty + 1) == '\n') {
+            empty += 2;
+        }
+        if (empty > 0) {
+            m_buffer.remove(0, empty);
+            m_skippedBytes += empty;
+            m_checkedForLf = 0;
+        }
         const qsizetype end = m_buffer.indexOf("\r\n\r\n");
+        // A line that ends with a bare LF: refused at once. Waiting for a CRLF
+        // CRLF that never comes would end in a misleading 408 after the header
+        // timeout (a request typed into ncat ends with LF LF).
+        const qsizetype headEnd = end < 0 ? m_buffer.size() : end + 4;
+        for (qsizetype i = m_checkedForLf; i < headEnd; ++i) {
+            if (m_buffer.at(i) == '\n' && (i == 0 || m_buffer.at(i - 1) != '\r')) {
+                return fail(400, QStringLiteral("bad_request"), QStringLiteral("lines must end with CRLF"));
+            }
+        }
+        m_checkedForLf = headEnd;
         if (end < 0) {
-            if (m_buffer.size() > m_maxHeaderBytes) {
+            if (m_skippedBytes + m_buffer.size() > m_maxHeaderBytes) {
                 return fail(431, QStringLiteral("headers_too_large"),
                             QStringLiteral("request line and headers exceed %1 bytes").arg(m_maxHeaderBytes),
                             {{QStringLiteral("limit"), static_cast<double>(m_maxHeaderBytes)}});
@@ -102,7 +123,7 @@ LC_HttpRequestParser::State LC_HttpRequestParser::feed(const QByteArrayView data
             return m_state;
         }
         const qsizetype headSize = end + 4;
-        if (headSize > m_maxHeaderBytes) {
+        if (m_skippedBytes + headSize > m_maxHeaderBytes) {
             return fail(431, QStringLiteral("headers_too_large"),
                         QStringLiteral("request line and headers exceed %1 bytes").arg(m_maxHeaderBytes),
                         {{QStringLiteral("limit"), static_cast<double>(m_maxHeaderBytes)}});
@@ -265,6 +286,7 @@ QByteArray reasonPhrase(const int status) {
         case 409: return "Conflict";
         case 411: return "Length Required";
         case 413: return "Content Too Large";
+        case 417: return "Expectation Failed";
         case 421: return "Misdirected Request";
         case 422: return "Unprocessable Content";
         case 431: return "Request Header Fields Too Large";

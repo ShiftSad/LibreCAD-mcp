@@ -21,6 +21,9 @@ from .errors import ApiError
 # File types LibreCAD opens (GET /formats "open") and the extension each written format needs.
 OPEN_EXTENSIONS = (".dxf", ".dwg", ".lff", ".cxf", ".jww", ".jwc", ".shp")
 FORMAT_EXTENSIONS = {"dxf": ".dxf", "dwg": ".dwg", "pdf": ".pdf", "png": ".png", "svg": ".svg"}
+# Written through Qt, which takes any file name. LibreCAD's drawing readers and writers (DXF, DWG and
+# the other files it opens) hand the system an 8-bit name instead: see file_name_encoding().
+_QT_WRITTEN_FORMATS = {"pdf", "png", "svg"}
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -86,9 +89,31 @@ def _is_device_namespace(p: str) -> bool:
 
 
 def _is_device_name(name: str) -> bool:
-    """``COM1.dxf``, ``nul.svg``, ``COM1 .dxf``: the part before the first dot, without trailing
-    spaces and dots, as Windows reads it."""
-    return name.split(".")[0].rstrip(" .").upper() in _WINDOWS_DEVICE_NAMES
+    """``COM1.dxf``, ``nul.svg``, ``COM1 .dxf``, `` COM1.dxf``: the part before the first dot, without
+    the spaces around it, as LibreCAD judges it (Windows itself drops only the trailing ones)."""
+    return name.split(".")[0].strip().upper() in _WINDOWS_DEVICE_NAMES
+
+
+def file_name_encoding() -> str:
+    """The codec of the 8-bit file names LibreCAD's drawing readers and writers pass to the system:
+    the ANSI code page on Windows (``mbcs``, which in strict mode refuses a character the code page
+    lacks instead of replacing it by a look-alike), UTF-8 elsewhere."""
+    return "mbcs" if os.name == "nt" else "utf-8"
+
+
+def _unencodable(text: str, encoding: str) -> str | None:
+    """The first character of ``text`` that ``encoding`` cannot carry, or None."""
+    try:
+        text.encode(encoding)
+        return None
+    except UnicodeEncodeError:
+        pass
+    for ch in text:
+        try:
+            ch.encode(encoding)
+        except UnicodeEncodeError:
+            return ch
+    return text
 
 
 def resolved_path(path: str) -> str | None:
@@ -107,14 +132,19 @@ def resolved_path(path: str) -> str | None:
 
 
 def check_path(path: str, kind: PathKind, fmt: str | None = None, *, windows: bool | None = None,
-               env: Mapping[str, str] | None = None, roots: list[str] | None = None) -> str:
+               env: Mapping[str, str] | None = None, roots: list[str] | None = None,
+               encoding: str | None = None) -> str:
     """Check a file path before it is sent to LibreCAD and return it normalized.
 
     Rules: an absolute local path; no network (UNC, ``//host``) path unless
     LIBRECAD_MCP_ALLOW_NETWORK_PATHS=1, and never a device-namespace one (``\\\\?\\``, ``\\\\.\\``); no
-    ``:`` after the drive (an alternate data stream); inside LIBRECAD_MCP_ALLOWED_ROOTS when that is set; an
+    ``:`` after the drive (an alternate data stream); for a file LibreCAD reads or writes as a drawing
+    (all but PDF, PNG and SVG exports), only characters the system's 8-bit file name encoding carries
+    (on Windows a character outside the ANSI code page becomes a look-alike: a full-width ``\\`` turns
+    into a real one, which leads out of the allowed folders); inside LIBRECAD_MCP_ALLOWED_ROOTS when that is set; an
     extension matching the format (``kind="open"``: a file type LibreCAD opens). Raises
-    BlockedByPolicy otherwise. ``windows``, ``env`` and ``roots`` exist for tests.
+    BlockedByPolicy otherwise. ``windows``, ``env``, ``roots`` and ``encoding`` (default
+    file_name_encoding()) exist for tests.
     """
     native = windows is None
     windows = (os.name == "nt") if windows is None else windows
@@ -131,6 +161,16 @@ def check_path(path: str, kind: PathKind, fmt: str | None = None, *, windows: bo
         raise BlockedByPolicy("bad_path", "the path contains a control character",
                               "Pass an absolute file path without control characters.",
                               "".join("�" if _is_control(ch) else ch for ch in p))
+    if kind == "open" or (fmt or "").lower() not in _QT_WRITTEN_FORMATS:
+        # LibreCAD refuses these too (400 bad_path): the file it opened would be another one.
+        bad = _unencodable(p, encoding or file_name_encoding())
+        if bad is not None:
+            shown = f"{bad!r} (U+{ord(bad):04X})" if len(bad) == 1 else "characters"
+            raise BlockedByPolicy(
+                "bad_path", f"the path contains {shown} that this system's file names cannot carry: "
+                "LibreCAD would read or write another file",
+                "Rename the file or folder without that character, or export PDF, PNG or SVG, which take any "
+                "name.", path)
     if p.startswith("~"):
         raise BlockedByPolicy("bad_path", "'~' is not expanded on the LibreCAD side",
                               "Pass the full absolute path, for example from the user's home folder.", path)

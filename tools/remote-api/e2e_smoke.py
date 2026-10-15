@@ -154,6 +154,18 @@ def dwg_version(data: bytes) -> str:
     return data[:6].decode("ascii", "replace")
 
 
+def ansi_lacks(text: str) -> bool:
+    """True on Windows when the ANSI code page cannot carry ``text`` (strict ``mbcs`` refuses what
+    the system would replace by a look-alike)."""
+    if os.name != "nt":
+        return False
+    try:
+        text.encode("mbcs")
+        return False
+    except UnicodeEncodeError:
+        return True
+
+
 def looks_like_dxf(data: bytes) -> bool:
     if data.startswith(b"AutoCAD Binary DXF"):
         return True
@@ -1267,6 +1279,49 @@ def step_negative(r: Runner, api: ApiClient, st: State) -> None:
                         timeout=LONG_TIMEOUT)
         r.expect("a path with a NUL -> 400 bad_path", resp, 400, "bad_path")
         r.check("nothing was written", not (st.out_dir / "run.bat").exists())
+        # Windows hands the DXF writer its name in the ANSI code page, where a full-width backslash
+        # is a '\': this name would have written e2e-escaped.dxf next to the output folder
+        if ansi_lacks("＼"):
+            escaped = st.out_dir.parent / "e2e-escaped.dxf"
+            resp = api.post("documents/export", {"path": str(st.out_dir / "..＼e2e-escaped.dxf"), "format": "dxf"},
+                            q, timeout=LONG_TIMEOUT)
+            r.check("a name the ANSI code page cannot carry -> 400 bad_path with its character",
+                    resp.status == 400 and resp.error == "bad_path" and resp.obj.get("character") == "U+FF3C", resp)
+            r.check("nothing was written outside the output folder", not escaped.exists())
+        else:
+            r.skip("a name the ANSI code page cannot carry", "this system's file names carry U+FF3C")
+        # Expect: 100-continue is answered before the body (curl waits a second for it over 1 MiB)
+        payload = b'{"bogus": 1}'
+        first, rest, took = b"", b"", 99.0
+        with socket.create_connection((api.host, api.port), timeout=10) as sock:
+            sock.sendall((f"POST {API}/undo?doc={doc} HTTP/1.1\r\nHost: 127.0.0.1:{api.port}\r\n"
+                          f"X-Api-Token: {api.token}\r\nContent-Type: application/json\r\nExpect: 100-continue\r\n"
+                          f"Content-Length: {len(payload)}\r\n\r\n").encode())
+            started = time.monotonic()
+            try:
+                first = sock.recv(65536)
+                took = time.monotonic() - started
+                sock.sendall(payload)
+                while chunk := sock.recv(65536):
+                    rest += chunk
+            except OSError as e:
+                rest += f"<<{type(e).__name__}>>".encode()
+        r.check("Expect: 100-continue -> 100 Continue at once, then the answer",
+                first == b"HTTP/1.1 100 Continue\r\n\r\n" and took < 1.0 and rest.startswith(b"HTTP/1.1 400"),
+                f"{short(first[:40])} after {took:.2f} s, then {short(rest[:40])}")
+        # a request typed with bare LF line endings is refused at once, not after the 5 s header timeout
+        raw, took = b"", 99.0
+        with socket.create_connection((api.host, api.port), timeout=10) as sock:
+            started = time.monotonic()
+            sock.sendall(f"GET {API}/status HTTP/1.1\nHost: 127.0.0.1:{api.port}\nX-Api-Token: {api.token}\n\n".encode())
+            try:
+                while chunk := sock.recv(65536):
+                    raw += chunk
+            except OSError as e:
+                raw += f"<<{type(e).__name__}>>".encode()
+            took = time.monotonic() - started
+        r.check("bare LF line endings -> 400 bad_request at once", raw.startswith(b"HTTP/1.1 400") and took < 2.0,
+                f"{short(raw[:40])} after {took:.2f} s")
         # a connection that sends nothing holds up nobody else
         with socket.create_connection((api.host, api.port), timeout=5):
             started = time.monotonic()

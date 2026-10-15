@@ -210,6 +210,67 @@ std::optional<FileIdentity> identityOf(const QString& path) {
 #endif
 }
 
+/**
+ * Files written by Qt (PDF, PNG and SVG exports) take any name. The drawing
+ * filters (DXF, DWG, LFF, CXF, JWW) and the readers hand the system the 8-bit
+ * name QFile::encodeName() makes: the ANSI code page on Windows, UTF-8
+ * elsewhere.
+ */
+bool writtenThroughQt(const QStringList& extensions) {
+    static const QStringList qtWritten{QStringLiteral(".pdf"), QStringLiteral(".png"), QStringLiteral(".svg")};
+    if (extensions.isEmpty()) {
+        return false;
+    }
+    for (const QString& extension : extensions) {
+        if (!qtWritten.contains(extension, Qt::CaseInsensitive)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * The first character of text that the system's 8-bit file name encoding does
+ * not carry through unchanged, or nullopt. On Windows a character outside the
+ * ANSI code page becomes a look-alike ("best fit": U+FF3C '\', U+FF0F '/',
+ * U+FF1A ':', U+0142 'l') or '?', so the file the system opens is not the one
+ * the rules here judged. An empty string when only the whole text fails.
+ */
+std::optional<QString> unencodableCharacter(const QString& text) {
+    const auto survives = [](const QString& s) { return QFile::decodeName(QFile::encodeName(s)) == s; };
+    if (survives(text)) {
+        return std::nullopt;
+    }
+    for (qsizetype i = 0; i < text.size();) {
+        const qsizetype length =
+            text.at(i).isHighSurrogate() && i + 1 < text.size() && text.at(i + 1).isLowSurrogate() ? 2 : 1;
+        const QString character = text.mid(i, length);
+        if (!survives(character)) {
+            return character;
+        }
+        i += length;
+    }
+    return QString();
+}
+
+QString codePoint(const QString& character) {
+    if (character.isEmpty()) {
+        return {};
+    }
+    const char32_t code = character.size() == 2 ? QChar::surrogateToUcs4(character.at(0), character.at(1))
+                                                : character.at(0).unicode();
+    return QStringLiteral("U+") + QString::number(static_cast<uint>(code), 16).toUpper().rightJustified(4, QLatin1Char('0'));
+}
+
+/** The 8-bit file name encoding of this system, as people know it. */
+QString fileNameEncoding() {
+#ifdef Q_OS_WIN
+    return QStringLiteral("Windows code page %1").arg(GetACP());
+#else
+    return QStringLiteral("UTF-8");
+#endif
+}
+
 /** The first control character (U+0000..U+001F, U+007F) of text, or -1. */
 qsizetype controlCharacter(const QString& text) {
     for (qsizetype i = 0; i < text.size(); ++i) {
@@ -319,6 +380,26 @@ QString LC_RemoteApiPathPolicy::check(const QString& path, const Access access, 
             }
         }
         fail(400, "bad_path", QStringLiteral("the path contains a control character (at %1)").arg(at), shown);
+    }
+    // A name the system's 8-bit encoding changes: the drawing would be read
+    // from, or written to, another file than the one the rules below judge (a
+    // name "..<U+FF3C>outside<U+FF3C>a.dxf" in an allowed folder is
+    // "..\outside\a.dxf" to Windows, outside that folder).
+    if (!writtenThroughQt(extensions)) {
+        if (const std::optional<QString> character = unencodableCharacter(raw)) {
+            const QString code = codePoint(*character);
+            fail(400, "bad_path",
+                 character->isEmpty()
+                     ? QStringLiteral("the path cannot be written in this system's file name encoding (%1)")
+                           .arg(fileNameEncoding())
+                     : QStringLiteral("the path contains '%1' (%2), which this system's file name encoding (%3) "
+                                      "cannot carry: LibreCAD would read or write another file")
+                           .arg(*character, code, fileNameEncoding()),
+                 path,
+                 {{QStringLiteral("character"), code},
+                  {QStringLiteral("hint"), QStringLiteral("rename the file or folder without that character; "
+                                                          "PDF, PNG and SVG exports take any name")}});
+        }
     }
 
     const bool network = isNetworkPath(raw);

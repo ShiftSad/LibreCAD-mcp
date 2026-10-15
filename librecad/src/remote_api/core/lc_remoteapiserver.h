@@ -57,9 +57,12 @@ class LC_RemoteApiRouter;
  *     the header limit (431); chunked bodies are refused (411);
  *  2. check Host (421 bad_host), then Origin (403 origin_not_allowed), then
  *     the token, X-Api-Token or Authorization: Bearer (401 unauthorized), then
- *     X-Request-Timeout-Ms (400 bad_header), as soon as the headers are in: a
- *     refused client never sends its body;
+ *     X-Request-Timeout-Ms (400 bad_header), then Expect (417
+ *     expectation_failed for anything but 100-continue), as soon as the
+ *     headers are in: a refused client never sends its body;
  *  3. read the body within the read timeout (408), with the body limit (413);
+ *     an HTTP/1.1 client that sent "Expect: 100-continue" is sent
+ *     "100 Continue" first, unless its body is already in;
  *  4. queue it for the dispatcher, which calls router.dispatch() (GUI routes
  *     run on the GUI thread). While it waits, the reader watches the client:
  *     - X-Request-Timeout-Ms (the client's own deadline, in ms) caps the wait:
@@ -68,6 +71,7 @@ class LC_RemoteApiRouter;
  *       GUI thread at that deadline;
  *     - a client whose connection fails is gone: a queued request is dropped
  *       without running, a running one stops waiting for the GUI thread;
+ *     - a dropped request leaves the queue at once, with its body;
  *     - a client that ends its sending (a half-close, or a full close) may still
  *       read: an HTTP/1.1 client is sent "100 Continue", and again every
  *       interimRepeatMs while it waits, which a closed socket answers with a
@@ -79,8 +83,9 @@ class LC_RemoteApiRouter;
  * more is answered 503 server_busy. At most maxIncoming connections may still
  * be sending their headers; when one more arrives, the oldest of them that has
  * nothing waiting to be read is closed (408) to make room. Refused connections
- * are read for a short while before they close, so that the client reads the
- * refusal instead of a reset.
+ * are read for up to a second before they close, so that the client reads the
+ * refusal instead of a reset; at most 64 at a time, and when more are refused
+ * at once, the ones whose client is not expected to send more close first.
  *
  * The router and the context must outlive the server; the server only reads
  * the router (routes are added before start()).
@@ -125,6 +130,8 @@ public:
 
     // Steps 2 and 4 for one parsed request (also used by the tests).
     LC_ApiResponse handle(const LC_ApiRequest& request) const;
+    // The bytes of request bodies waiting for the dispatcher (for the tests).
+    qint64 queuedBodyBytes() const;
 
 protected:
     void run() override;
@@ -144,16 +151,23 @@ private:
     bool readIncoming(Incoming& incoming, QByteArray& buffer, Readers& readers);
     // Steps 2 and the reader's start, for a connection whose headers are in.
     void admit(Incoming& incoming, Readers& readers);
-    // Answers a connection on the accepting thread (one try: the answer is small).
-    void refuseConnection(qintptr descriptor, const LC_ApiResponse& response);
+    // Answers a connection on the accepting thread (one try: the answer is
+    // small). sending: the client is expected to send more (its body, or the
+    // rest of its request), so it is read for longest (see drainLater).
+    void refuseConnection(qintptr descriptor, const LC_ApiResponse& response, bool sending);
     // Writes a refusal, then hands the connection to the accepting thread.
     void refuseAndDrain(qintptr descriptor, const LC_ApiResponse& response);
-    // The accepting thread reads what the client still sends for a short while,
-    // then closes the connection: closing it with unread data would reset it,
-    // and the client would lose the answer.
-    void drainLater(qintptr descriptor);
-    void serviceDraining(bool closeAll);       // the accepting thread
+    // The accepting thread reads what the client still sends for up to a
+    // second, then closes the connection: closing it with unread data would
+    // reset it, and the client would lose the answer. Any thread.
+    void drainLater(qintptr descriptor, bool sending);
+    // The accepting thread: reads the refused connections, closes the ones
+    // that are done, and keeps at most MaxDraining (closing first the ones
+    // whose client is not expected to send more).
+    void serviceDraining(bool closeAll);
     bool enqueue(const std::shared_ptr<Job>& job);
+    // A reader that dropped its job takes it out of the queue, with its body.
+    void forget(const std::shared_ptr<Job>& job);
     bool writeAll(qintptr descriptor, const QByteArray& data) const;
     bool hostAllowed(const QByteArray& host) const;
     // Step 2: the refusal of a request that may not reach the router, if any;
@@ -177,7 +191,7 @@ private:
     std::atomic<quint16> m_port{0};
 
     // requests waiting for the dispatcher
-    std::mutex m_queueMutex;
+    mutable std::mutex m_queueMutex;
     std::condition_variable m_queueChanged;
     std::deque<std::shared_ptr<Job>> m_queue;
 
@@ -185,6 +199,7 @@ private:
     struct Draining {
         qintptr descriptor = 0;
         QDeadlineTimer until;
+        bool sending = false;   // the client is expected to send more, or did
     };
     std::mutex m_drainMutex;
     std::vector<Draining> m_draining;

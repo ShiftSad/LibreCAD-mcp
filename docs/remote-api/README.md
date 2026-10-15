@@ -343,12 +343,12 @@ means more than 5000 entities or ids in one request.
 
 | HTTP | Tokens |
 |---|---|
-| 400 | `bad_request`, `invalid_json`, `body_must_be_object`, `unknown_field`, `missing_param`, `bad_param`, `bad_path` (also a path with a control character), `bad_header` (an `X-Request-Timeout-Ms` that is not a whole number of milliseconds from 1 to 600000; with `header`, `min`, `max`) |
+| 400 | `bad_request`, `invalid_json`, `body_must_be_object`, `unknown_field`, `missing_param`, `bad_param`, `bad_path` (also a path with a control character, or, for a drawing, a character the system's code page lacks: with `character`), `bad_header` (an `X-Request-Timeout-Ms` that is not a whole number of milliseconds from 1 to 600000; with `header`, `min`, `max`) |
 | 401 | `unauthorized` |
 | 403 | `origin_not_allowed`, `path_not_allowed`, `commands_disabled` |
 | 404 | `not_found` (route), `unknown_document`, `unknown_entity`, `unknown_layer`, `unknown_block`, `unknown_view`, `file_not_found` |
 | 405 | `method_not_allowed` (with `allowed`) |
-| 408, 411, 413, 421, 431 | `request_timeout`, `length_required`, `body_too_large`, `bad_host`, `headers_too_large` |
+| 408, 411, 413, 417, 421, 431 | `request_timeout`, `length_required`, `body_too_large`, `expectation_failed` (an `Expect` other than `100-continue`), `bad_host`, `headers_too_large` |
 | 409 | `no_document`, `gui_modal_open`, `unsaved_changes`, `file_exists`, `file_open_in_other_window`, `document_unnamed`, `cannot_save_in_place`, `partial_import`, `document_closed` (the window of a drawing being opened was closed meanwhile), `layer_exists`, `layer_not_empty`, `layer_locked`, `layer_frozen`, `entity_locked`, `ambiguous_id` |
 | 422 | `invalid_entity` (with `errors`, for example `{"entities[2].radius": "must be > 0"}`, and `allowed`), `unsupported_format`, `extension_mismatch`, `import_failed`, `invalid_hatch_boundary`, `not_closed`, `cannot_rename_layer_0`, `cannot_delete_layer_0`, `too_many`, `bad_param` (an unknown save or export `version`, with `allowed`) |
 | 500 | `internal`, `save_failed`, `export_failed` |
@@ -407,6 +407,7 @@ still runs; send HTTP/1.1, or a deadline, to be sure. Autosave waits while a req
 | reading the whole request | 15 s | `408 request_timeout` |
 | requests past their headers at the same time | 16 | `503 server_busy` |
 | connections still sending their headers | 64 | the oldest with nothing waiting to be read is closed (`408`) |
+| refused connections read before they close | 64, for up to 1 s each | when more are refused at once, the ones whose client sent its whole request close first |
 | entities per `POST /entities`, ids per request | 5000 | `422 too_many` |
 | `GET /entities` page | 1000 | |
 | render size | 64 to 4096 pixels per side | |
@@ -440,7 +441,19 @@ Connections:
   their headers; when one more arrives, the oldest of them that has nothing waiting to be read is
   closed (`408`) to make room, so idle connections from another program cannot lock the real
   client out, and a request already sent is never taken for an idle one. A refused connection is
-  read for up to a second before it is closed, so the client reads the refusal instead of a reset.
+  read for up to a second before it is closed, as fast as the client sends, so the client reads
+  the refusal instead of a reset; a client still sending a body after that second is reset. At
+  most 64 refused connections are read at a time: when more are refused at once (a flood of
+  connections without the token, or of idle ones answered `408`), the ones whose client sent its
+  whole request, or nothing, are closed first, and one still sending its body only when no other
+  is left.
+- A client that sends `Expect: 100-continue` (curl does, before a body over 1 MiB) is answered
+  `HTTP/1.1 100 Continue` as soon as its headers pass the checks, so it sends its body at once
+  instead of after its own timeout; a refused request gets its final answer instead. Any other
+  expectation is `417 expectation_failed`. An HTTP/1.0 request's expectation is ignored.
+- Lines must end with CRLF: a request typed with bare LF line endings (into `ncat` without `-C`,
+  say) is answered `400 bad_request` ("lines must end with CRLF") as soon as the LF arrives. Empty
+  lines before the request line are ignored.
 - A client may end its sending after the request (a half-close, as `ncat` or `socat` do, or
   `shutdown(SHUT_WR)`): it still gets the answer. LibreCAD then sends an HTTP/1.1 client an interim
   `HTTP/1.1 100 Continue`, and again every second while the request waits, which a client that
@@ -468,7 +481,15 @@ a password. The rules:
    NUL would cut the name the system opens: `run.bat\0.dxf` writes `run.bat`) and, on Windows,
    without a `:` after the drive (`host.txt:x.pdf` is a hidden stream of `host.txt`; on a share
    too) or a device name such as `COM1.dxf`, `COM¹.dxf` or `NUL.svg`; they are
-   normalized first. Network paths (`\\server\share`, `//host`) are refused unless you allow
+   normalized first. LibreCAD's drawing reader and writer (DXF, DWG and the other files it opens)
+   pass a file name to Windows in the system's ANSI code page, which turns a character it lacks
+   into a look-alike: a full-width `＼` into `\`, `ł` into `l`, Chinese characters into `?`. So a
+   path for open, save, save-as or a DXF/DWG export may only use characters of that code page
+   (`400 bad_path`, with the `character`): otherwise LibreCAD would read or write another file
+   than the one checked, possibly outside the allowed folders. The letters of your system's
+   language (`Residência`) are fine, and PDF, PNG and SVG exports take any name. On Linux and
+   macOS file names are UTF-8 and carry every character.
+   Network paths (`\\server\share`, `//host`) are refused unless you allow
    them, because opening one can send your Windows credentials to that server. Device-namespace
    paths (`\\?\C:\...`, `\\.\...`) are always refused (`403 path_not_allowed`): write
    `C:\...` instead. With **Restrict file access** set, only paths inside those folders are accepted

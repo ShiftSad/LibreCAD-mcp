@@ -38,12 +38,15 @@
  * request line, the headers and Content-Length bytes of body are in, or Error
  * as soon as the request breaks a rule. An error carries the status and the
  * envelope token of the design's catalog:
- * - 400 bad_request: malformed request line, header or Content-Length, or a
+ * - 400 bad_request: malformed request line, header or Content-Length, a
+ *   line of the head that ends with a bare LF (as soon as it arrives), or a
  *   connection that ends before the request is complete (finish());
  * - 411 length_required: any Transfer-Encoding (chunked bodies are refused);
  * - 413 body_too_large: Content-Length above the body limit;
  * - 431 headers_too_large: request line plus headers above the header limit.
- * Header names are lower-cased. The path and the query are percent-decoded;
+ * Empty lines (CRLF) before the request line are ignored (RFC 9112 2.2); they
+ * count toward the header limit. Header names are lower-cased. The path and
+ * the query are percent-decoded;
  * in the query '+' is a space as well, and repeated keys are all kept.
  */
 class LC_HttpRequestParser {
@@ -81,6 +84,8 @@ private:
     QByteArray m_buffer;
     bool m_headersDone = false;
     bool m_http10 = false;
+    qsizetype m_skippedBytes = 0;   // empty lines before the request line
+    qsizetype m_checkedForLf = 0;   // the head is free of bare LFs up to here
     qsizetype m_contentLength = 0;
     LC_ApiRequest m_request;
     LC_ApiError m_error{400, QStringLiteral("bad_request")};

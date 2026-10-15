@@ -38,6 +38,7 @@
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -178,6 +179,37 @@ void halfCloseNative(const NativeSocket s) {
 #else
     ::shutdown(s, SHUT_WR);
 #endif
+}
+
+// Reads until the server closes the connection (or the receive timeout passes).
+QByteArray receiveUntilClosed(const NativeSocket s) {
+    QByteArray data;
+    char chunk[4096];
+    for (;;) {
+        const auto n = ::recv(s, chunk, sizeof(chunk), 0);
+        if (n <= 0) {
+            return data;
+        }
+        data.append(chunk, n);
+    }
+}
+
+// Whether the server sent something within ms (without reading it).
+bool readableWithin(const NativeSocket s, const int ms) {
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(s, &set);
+    timeval timeout{ms / 1000, (ms % 1000) * 1000};
+    return ::select(static_cast<int>(s) + 1, &set, nullptr, nullptr, &timeout) > 0;
+}
+
+void setSendTimeout(const NativeSocket s, const int ms) {
+#ifdef _WIN32
+    const DWORD timeout = static_cast<DWORD>(ms);
+#else
+    timeval timeout{ms / 1000, (ms % 1000) * 1000};
+#endif
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
 }
 
 // How exchange() behaves, and what it saw.
@@ -1051,6 +1083,204 @@ TEST_CASE("Remote API server: the client's deadline caps the wait for LibreCAD",
     CHECK(timer.elapsed() < 5000);
     pumpFor(200);
     CHECK(runs.load() == 0);
+}
+
+TEST_CASE("Remote API server answers Expect: 100-continue before the body", "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start();
+    const QByteArray body = "{\"a\":1}";
+    const QByteArray rest = "Host: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " + fixture.token +
+                            "\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n";
+
+    SECTION("an HTTP/1.1 client that waits with its body is told to send it at once") {
+        // RFC 9110 10.1.1; curl waits a second for it before every body over 1 MiB
+        const NativeSocket s = connectNative(port);
+        REQUIRE(s != NoSocket);
+        QElapsedTimer timer;
+        timer.start();
+        REQUIRE(sendNative(s, "POST /api/v1/echo HTTP/1.1\r\n" + rest + "Expect: 100-continue\r\n\r\n"));
+        REQUIRE(readableWithin(s, 3000));
+        CHECK(timer.elapsed() < 1000);
+        CHECK(receiveNative(s, "\r\n\r\n") == "HTTP/1.1 100 Continue\r\n\r\n");
+        REQUIRE(sendNative(s, body));
+        const QByteArray answer = receiveUntilClosed(s);
+        CHECK(answer.startsWith("HTTP/1.1 201"));
+        CHECK(answer.contains("\"a\":1"));
+        closeNative(s);
+    }
+    SECTION("no interim answer when the body came with the headers") {
+        Exchange options;
+        const HttpReply reply = exchange(port, "POST /api/v1/echo HTTP/1.1\r\n" + rest + "Expect: 100-continue\r\n\r\n" + body,
+                                         10000, &options);
+        CHECK(reply.status == 201);
+        CHECK(options.interim == 0);
+    }
+    SECTION("HTTP/1.0 ignores the expectation") {
+        const NativeSocket s = connectNative(port);
+        REQUIRE(s != NoSocket);
+        REQUIRE(sendNative(s, "POST /api/v1/echo HTTP/1.0\r\n" + rest + "Expect: 100-continue\r\n\r\n"));
+        CHECK_FALSE(readableWithin(s, 500));
+        REQUIRE(sendNative(s, body));
+        CHECK(receiveUntilClosed(s).startsWith("HTTP/1.1 201"));
+        closeNative(s);
+    }
+    SECTION("another expectation is refused at once, and so is a client without the token") {
+        QElapsedTimer timer;
+        timer.start();
+        Exchange options;
+        HttpReply reply = exchange(port, "POST /api/v1/echo HTTP/1.1\r\n" + rest + "Expect: 200-ok\r\n\r\n", 5000, &options);
+        CHECK(reply.status == 417);
+        CHECK(reply.error() == "expectation_failed");
+        CHECK(reply.json.value("header").toString() == "Expect");
+        CHECK(options.interim == 0);
+        CHECK(timer.elapsed() < 2000);
+        // a repeated header arrives joined: still only 100-continue
+        reply = exchange(port, "POST /api/v1/echo HTTP/1.1\r\n" + rest + "Expect: 100-Continue\r\nExpect: 100-continue\r\n\r\n" + body);
+        CHECK(reply.status == 201);
+        // the final status instead of the 100: the client never sends its body
+        options = {};
+        reply = exchange(port, "POST /api/v1/echo HTTP/1.1\r\nHost: 127.0.0.1:" + QByteArray::number(port) +
+                                   "\r\nContent-Length: 7\r\nExpect: 100-continue\r\n\r\n", 5000, &options);
+        CHECK(reply.status == 401);
+        CHECK(options.interim == 0);
+    }
+}
+
+TEST_CASE("Remote API server answers a request with bare LF line endings at once", "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start(); // 5 s for the headers
+    QElapsedTimer timer;
+    timer.start();
+    // as typed into ncat: the request never ends with CRLF CRLF
+    const HttpReply reply = exchange(port, "GET /api/v1/ping HTTP/1.1\nHost: 127.0.0.1:" + QByteArray::number(port) +
+                                               "\nX-Api-Token: " + fixture.token + "\n\n", 8000);
+    CHECK(reply.status == 400);
+    CHECK(reply.error() == "bad_request");
+    CHECK(reply.json.value("detail").toString() == "lines must end with CRLF");
+    CHECK(timer.elapsed() < 2000); // not 408 after the 5 s header timeout
+    // an empty line before the request line is ignored (RFC 9112 2.2)
+    CHECK(exchange(port, "\r\n" + get("/api/v1/ping", port, fixture.token)).status == 200);
+}
+
+TEST_CASE("Remote API server: a request dropped while queued leaves the queue with its body", "[remote-api][server]") {
+    Fixture fixture;
+    std::atomic<int> runs{0};
+    LC_RouteOptions gui;
+    gui.capability = "test";
+    gui.timeoutMs = 120000; // as open, save and export
+    fixture.router.add("POST", "/api/v1/slow", gui, [](LC_ApiCall&) { return LC_ApiResponse::ok({}); });
+    fixture.router.add("POST", "/api/v1/sink", gui, [&runs](LC_ApiCall&) {
+        ++runs;
+        return LC_ApiResponse::ok({}, 201);
+    });
+    const quint16 port = fixture.start();
+    const QByteArray head = "Host: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " + fixture.token + "\r\n";
+    const QByteArray body = "{" + QByteArray(256 * 1024, ' ') + "}";
+    const QByteArray sink = "POST /api/v1/sink HTTP/1.1\r\n" + head + "Content-Length: " + QByteArray::number(body.size());
+
+    // The first request holds the dispatcher: nothing pumps the GUI thread yet.
+    HttpReply first;
+    std::thread holder([&] { first = exchange(port, "POST /api/v1/slow HTTP/1.1\r\n" + head + "Content-Length: 0\r\n\r\n", 20000); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // answered at their deadline while they wait behind it
+    for (int i = 0; i < 5; ++i) {
+        CAPTURE(i);
+        const HttpReply dropped = exchange(port, sink + "\r\nX-Request-Timeout-Ms: 100\r\n\r\n" + body, 5000);
+        CHECK(dropped.status == 504);
+    }
+    // their bodies went with them, though the dispatcher has not got to them (it would hold them for as
+    // long as the first request runs: up to 120 s)
+    CHECK(fixture.server->queuedBodyBytes() == 0);
+
+    // one that still waits keeps its body until its client leaves
+    const NativeSocket waiting = connectNative(port);
+    REQUIRE(waiting != NoSocket);
+    REQUIRE(sendNative(waiting, sink + "\r\n\r\n" + body));
+    QElapsedTimer timer;
+    timer.start();
+    while (fixture.server->queuedBodyBytes() != body.size() && timer.elapsed() < 3000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(fixture.server->queuedBodyBytes() == body.size());
+    closeNative(waiting);
+    timer.restart();
+    while (fixture.server->queuedBodyBytes() != 0 && timer.elapsed() < 3000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(fixture.server->queuedBodyBytes() == 0);
+
+    pumpFor(300); // LibreCAD is free again: the first one runs, the dropped ones never
+    holder.join();
+    CHECK(first.status == 200);
+    pumpFor(200);
+    CHECK(runs.load() == 0);
+}
+
+TEST_CASE("Remote API server: a refused client still sending reads its answer while many more are refused",
+          "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start();
+
+    // A, without the token, sends a 1 MB body slowly: it is refused (401) at its headers, and read while it sends
+    const NativeSocket a = connectNative(port);
+    REQUIRE(a != NoSocket);
+    REQUIRE(sendNative(a, "POST /api/v1/echo HTTP/1.1\r\nHost: 127.0.0.1:" + QByteArray::number(port) +
+                              "\r\nContent-Length: 1000000\r\n\r\n"));
+    std::atomic<bool> stop{false};
+    std::thread trickle([&] {
+        const QByteArray chunk(1024, 'x');
+        while (!stop.load() && sendNative(a, chunk)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // then 100 more refusals within its second: more than the 64 refused connections read at once
+    std::vector<NativeSocket> others;
+    for (int i = 0; i < 100; ++i) {
+        const NativeSocket s = connectNative(port);
+        REQUIRE(s != NoSocket);
+        REQUIRE(sendNative(s, get("/api/v1/ping", port, {})));
+        others.push_back(s);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stop = true;
+    trickle.join();
+    // closing A, which still sent, would have reset it: its 401 lost
+    CHECK(receiveNative(a, "\r\n\r\n").startsWith("HTTP/1.1 401"));
+    int answered = 0;
+    for (const NativeSocket s : others) {
+        answered += receiveNative(s, "\r\n\r\n").startsWith("HTTP/1.1 ") ? 1 : 0; // 401, or 503 in a burst
+        closeNative(s);
+    }
+    CHECK(answered == 100);
+    closeNative(a);
+    CHECK(send(port, get("/api/v1/ping", port, fixture.token)).status == 200);
+}
+
+TEST_CASE("Remote API server reads a refused client's body as fast as it comes", "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start();
+    // 413 from Content-Length alone; this client sends its body all the same before it reads the answer
+    constexpr qint64 Total = 48 * 1024 * 1024;
+    const NativeSocket s = connectNative(port);
+    REQUIRE(s != NoSocket);
+    setSendTimeout(s, 5000);
+    REQUIRE(sendNative(s, "POST /api/v1/echo HTTP/1.1\r\nHost: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " +
+                              fixture.token + "\r\nContent-Length: " + QByteArray::number(Total) + "\r\n\r\n"));
+    const QByteArray chunk(256 * 1024, 'x');
+    qint64 sent = 0;
+    QElapsedTimer timer;
+    timer.start();
+    while (sent < Total && sendNative(s, chunk)) {
+        sent += chunk.size();
+    }
+    CAPTURE(sent, timer.elapsed());
+    // all of it within the second a refused connection is read (it was read one MiB per 20 ms slice:
+    // some 25 MB, then reset)
+    CHECK(sent == Total);
+    CHECK(receiveNative(s, "\r\n\r\n").startsWith("HTTP/1.1 413"));
+    closeNative(s);
 }
 
 TEST_CASE("Remote API server: a second server cannot take the port", "[remote-api][server]") {

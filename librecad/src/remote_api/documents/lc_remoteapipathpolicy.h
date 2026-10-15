@@ -43,8 +43,15 @@ public:
     /**
      * Checks path for access and returns it normalized (absolute, clean, '/'
      * separators). Throws LC_ApiError, in this order:
-     * - 400 bad_path (+path): empty, with a control character (a NUL would cut
-     *   the name the system opens), with a ':' after the drive (an alternate
+     * - 400 bad_path (+path): empty, or with a control character (a NUL would
+     *   cut the name the system opens);
+     * - 400 bad_path (+path, +character, +hint): a character the system's 8-bit
+     *   file name encoding cannot carry (QFile::encodeName: on Windows the ANSI
+     *   code page, which turns U+FF3C into '\', U+FF0F into '/', U+FF1A into
+     *   ':' and others into look-alikes or '?'), unless extensions holds only
+     *   .pdf, .png and .svg (Qt writes those by their UTF-16 name): LibreCAD's
+     *   drawing readers and writers open files by that 8-bit name;
+     * - 400 bad_path (+path): with a ':' after the drive (an alternate
      *   data stream, Windows), relative (also drive-relative "C:x" and
      *   rooted "\x" on Windows), or a directory;
      * - 403 path_not_allowed (+path): a UNC, \\?\ or device path while
