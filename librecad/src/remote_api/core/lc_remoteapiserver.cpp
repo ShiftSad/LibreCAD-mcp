@@ -21,14 +21,36 @@
 
 #include "lc_remoteapiserver.h"
 
+// The connections are served through the native socket API. QTcpSocket takes
+// the end of a client's sending (a half-close) for the end of the connection
+// and closes the socket, so a client that half-closes after its request would
+// lose its answer.
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "ws2_32.lib")
+#endif
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 #include <chrono>
+#include <climits>
 #include <list>
 
-#include <QDeadlineTimer>
 #include <QHostAddress>
 #include <QJsonObject>
 #include <QTcpServer>
-#include <QTcpSocket>
 
 #include "lc_remoteapiconfig.h"
 #include "lc_remoteapigui.h"
@@ -36,18 +58,187 @@
 #include "lc_remoteapirouter.h"
 
 namespace {
-constexpr int PollSliceMs = 100;      // how often the loops look at the stop flag
+constexpr int PollSliceMs = 50;       // how often the readers look at the stop flag
 constexpr int AcceptSliceMs = 200;
+constexpr int DrainSliceMs = 20;      // the accept loop's slice while refused connections drain
 constexpr int BindWaitMs = 2000;
 constexpr int StopWaitMs = 2000;
 constexpr int DrainMs = 1000;         // reading what is left of a refused request
+constexpr std::size_t MaxDraining = 64;
+constexpr qint64 DrainReadBudget = 1024 * 1024; // per connection and pass
 constexpr int StopFlushMs = 300;      // writing the last response while stopping
-constexpr int BusyWriteMs = 200;      // the 503 to a connection over the limit
-constexpr int WatchSliceMs = 50;      // watching the client while its request waits
+constexpr int WatchSliceMs = 20;      // looking at the client while its request waits
 constexpr qint64 ReadChunk = 64 * 1024;
 
+// Sent once to an HTTP/1.1 client that ends its sending while its request
+// waits: a client that closed its socket answers it with a reset (it is gone),
+// one that only half-closed reads it before the final answer (RFC 9110 15.2).
+const char InterimContinue[] = "HTTP/1.1 100 Continue\r\n\r\n";
+
+// ---- the native socket of a connection --------------------------------------
+namespace net {
+#ifdef _WIN32
+using Native = SOCKET;
+bool wouldBlock() {
+    return WSAGetLastError() == WSAEWOULDBLOCK;
+}
+#else
+using Native = int;
+bool wouldBlock() {
+    return errno == EAGAIN || errno == EWOULDBLOCK;
+}
+#endif
+
+Native native(const qintptr descriptor) {
+    return static_cast<Native>(descriptor);
+}
+
+// Non-blocking, and no SIGPIPE when the client is gone.
+void prepare(const qintptr descriptor) {
+#ifdef _WIN32
+    // An accepted socket inherits the event selection Qt set on the listening
+    // socket; drop it, so that the socket can be used on its own.
+    WSAEventSelect(native(descriptor), nullptr, 0);
+    u_long nonBlocking = 1;
+    ioctlsocket(native(descriptor), FIONBIO, &nonBlocking);
+#else
+    const int flags = fcntl(native(descriptor), F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(native(descriptor), F_SETFL, flags | O_NONBLOCK);
+    }
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    setsockopt(native(descriptor), SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+#endif
+}
+
+// Waits up to ms until the socket can be read (data, the end of the client's
+// sending, or a failure) or, with forWriting, written.
+void waitFor(const qintptr descriptor, const bool forWriting, const int ms) {
+#ifdef _WIN32
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(native(descriptor), &set);
+    timeval timeout{ms / 1000, (ms % 1000) * 1000};
+    select(0, forWriting ? nullptr : &set, forWriting ? &set : nullptr, nullptr, &timeout);
+#else
+    pollfd watched{native(descriptor), static_cast<short>(forWriting ? POLLOUT : POLLIN), 0};
+    while (poll(&watched, 1, ms) < 0 && errno == EINTR) {
+    }
+#endif
+}
+
+// What there is to read, without waiting: > 0 bytes read; 0 the client ended
+// its sending; -1 nothing yet; -2 the connection failed.
+qint64 read(const qintptr descriptor, char* buffer, const qint64 max) {
+    const int size = static_cast<int>(qMin<qint64>(max, INT_MAX));
+#ifdef _WIN32
+    const int n = ::recv(native(descriptor), buffer, size, 0);
+    if (n >= 0) {
+        return n;
+    }
+    return wouldBlock() ? -1 : -2;
+#else
+    for (;;) {
+        const ssize_t n = ::recv(native(descriptor), buffer, static_cast<size_t>(size), 0);
+        if (n >= 0) {
+            return n;
+        }
+        if (errno != EINTR) {
+            return wouldBlock() ? -1 : -2;
+        }
+    }
+#endif
+}
+
+// Sends what the socket takes now: >= 0 bytes sent; -1 none now; -2 the connection failed.
+qint64 send(const qintptr descriptor, const char* data, const qint64 size) {
+    const int chunk = static_cast<int>(qMin<qint64>(size, INT_MAX));
+#ifdef _WIN32
+    const int n = ::send(native(descriptor), data, chunk, 0);
+    if (n >= 0) {
+        return n;
+    }
+    return wouldBlock() ? -1 : -2;
+#else
+#ifdef MSG_NOSIGNAL
+    constexpr int flags = MSG_NOSIGNAL;
+#else
+    constexpr int flags = 0;
+#endif
+    for (;;) {
+        const ssize_t n = ::send(native(descriptor), data, static_cast<size_t>(chunk), flags);
+        if (n >= 0) {
+            return n;
+        }
+        if (errno != EINTR) {
+            return wouldBlock() ? -1 : -2;
+        }
+    }
+#endif
+}
+
+void shutdownSending(const qintptr descriptor) {
+#ifdef _WIN32
+    ::shutdown(native(descriptor), SD_SEND);
+#else
+    ::shutdown(native(descriptor), SHUT_WR);
+#endif
+}
+
+void close(const qintptr descriptor) {
+#ifdef _WIN32
+    ::closesocket(native(descriptor));
+#else
+    ::close(native(descriptor));
+#endif
+}
+
+// Closes with a reset: the client sees the connection fail at once.
+void abort(const qintptr descriptor) {
+    struct linger option{};
+    option.l_onoff = 1;
+    option.l_linger = 0;
+    setsockopt(native(descriptor), SOL_SOCKET, SO_LINGER, reinterpret_cast<const char*>(&option), sizeof(option));
+    close(descriptor);
+}
+} // namespace net
+
+// A reader's connection: reset when it goes out of scope, unless it was closed
+// or handed on.
+class Connection {
+public:
+    explicit Connection(const qintptr descriptor)
+        : m_descriptor(descriptor) {
+        net::prepare(descriptor);
+    }
+    ~Connection() {
+        if (m_open) {
+            net::abort(m_descriptor);
+        }
+    }
+    Connection(const Connection&) = delete;
+    Connection& operator=(const Connection&) = delete;
+
+    qintptr release() {
+        m_open = false;
+        return m_descriptor;
+    }
+    void close() {
+        if (m_open) {
+            m_open = false;
+            net::close(m_descriptor);
+        }
+    }
+
+private:
+    qintptr m_descriptor;
+    bool m_open = true;
+};
+
 // Hands each accepted connection over as a bare descriptor, so that its reader
-// thread can own the socket (a QTcpSocket belongs to the thread that made it).
+// thread can serve it on its own.
 class DescriptorServer : public QTcpServer {
 public:
     QList<qintptr> takePending() {
@@ -81,22 +272,60 @@ LC_ApiResponse shuttingDown() {
     return LC_ApiError(503, QStringLiteral("shutting_down"), QStringLiteral("the Remote API is stopping")).toResponse();
 }
 
+LC_ApiResponse serverBusy() {
+    return LC_ApiError(503, QStringLiteral("server_busy"), QStringLiteral("too many connections to the Remote API at once"),
+                       {{QStringLiteral("hint"), QStringLiteral("retry in a moment")}})
+        .toResponse();
+}
+
+LC_ApiResponse waitedPastDeadline() {
+    return LC_ApiError(504, QStringLiteral("ui_timeout"), QStringLiteral("the request waited past the client's deadline"),
+                       {{QStringLiteral("started"), false},
+                        {QStringLiteral("hint"), QStringLiteral("LibreCAD is busy; retry in a few seconds")}})
+        .toResponse();
+}
+
 } // namespace
 
 // One request, between its reader thread and the dispatcher.
 struct LC_RemoteApiServer::Job {
+    enum State : int { Queued, Taken, Dropped };
+
     LC_ApiRequest request;
     QDeadlineTimer clientDeadline{QDeadlineTimer::Forever};
-    std::atomic<bool> clientGone{false};   // the client closed the connection
+    std::atomic<bool> clientGone{false};   // the client's connection failed
+    std::atomic<int> state{Queued};
     std::promise<LC_ApiResponse> promise;
     std::atomic<bool> answered{false};
 
+    // The dispatcher takes it; false when its reader dropped it first.
+    bool take() {
+        int expected = Queued;
+        return state.compare_exchange_strong(expected, Taken);
+    }
+    // Its reader drops it (the client is gone, or past its deadline); false
+    // when the dispatcher took it first: then it runs.
+    bool drop() {
+        int expected = Queued;
+        return state.compare_exchange_strong(expected, Dropped);
+    }
     void answer(LC_ApiResponse response) {
         bool expected = false;
         if (answered.compare_exchange_strong(expected, true)) {
             promise.set_value(std::move(response));
         }
     }
+};
+
+// What a reader thread is doing, as the accepting thread sees it.
+struct LC_RemoteApiServer::ReaderSlot {
+    enum Phase : int {
+        Headers,   // its request headers have not all arrived
+        Request,   // past its headers and the token: reading, queued, running or answering
+        Evicted,   // closed by the accepting thread to make room
+        Finished
+    };
+    std::atomic<int> phase{Headers};
 };
 
 LC_RemoteApiServer::LC_RemoteApiServer(const LC_RemoteApiRouter& router, LC_RemoteApiContext& context)
@@ -188,57 +417,169 @@ void LC_RemoteApiServer::run() {
     dispatcher->start();
     m_bindPromise->set_value(BindOutcome{StartResult::Listening, {}});
 
-    std::list<std::unique_ptr<QThread>> readers;
+    struct Reader {
+        std::unique_ptr<QThread> thread;
+        std::shared_ptr<ReaderSlot> slot;
+    };
+    std::list<Reader> readers;
+    const int maxConnections = qMax(1, m_limits.maxConnections);
     const auto reap = [&readers] {
-        readers.remove_if([](const std::unique_ptr<QThread>& reader) {
-            return reader->isFinished();
+        readers.remove_if([](const Reader& reader) {
+            return reader.thread->isFinished();
         });
     };
+    // Whether a new connection may have a reader. When every reader is busy,
+    // the one that has waited longest for its request headers gives way (idle
+    // connections cannot lock the real client out); when every one is past its
+    // headers, nobody does. Evicted readers end within a poll slice; until then
+    // they count against twice the limit.
+    const auto makeRoom = [&readers, maxConnections] {
+        if (static_cast<int>(readers.size()) >= 2 * maxConnections) {
+            return false;
+        }
+        int serving = 0;
+        for (const Reader& reader : readers) {
+            const int phase = reader.slot->phase.load();
+            serving += phase == ReaderSlot::Headers || phase == ReaderSlot::Request ? 1 : 0;
+        }
+        if (serving < maxConnections) {
+            return true;
+        }
+        for (Reader& reader : readers) {   // oldest first
+            int expected = ReaderSlot::Headers;
+            if (reader.slot->phase.compare_exchange_strong(expected, ReaderSlot::Evicted)) {
+                return true;
+            }
+        }
+        return false;
+    };
     while (!m_stop.load()) {
+        bool draining = false;
+        {
+            const std::lock_guard<std::mutex> lock(m_drainMutex);
+            draining = !m_draining.empty();
+        }
         bool timedOut = false;
-        if (!server.waitForNewConnection(AcceptSliceMs, &timedOut) && !timedOut) {
+        if (!server.waitForNewConnection(draining ? DrainSliceMs : AcceptSliceMs, &timedOut) && !timedOut) {
             msleep(PollSliceMs); // a socket error: do not spin
         }
         reap();
         for (const qintptr descriptor : server.takePending()) {
-            if (m_stop.load() || static_cast<int>(readers.size()) >= m_limits.maxConnections) {
-                refuseBusy(descriptor);
+            if (m_stop.load()) {
+                refuseConnection(descriptor, shuttingDown());
                 continue;
             }
-            std::unique_ptr<QThread> reader(QThread::create([this, descriptor] { serveConnection(descriptor); }));
-            reader->setObjectName(QStringLiteral("remote-api-connection"));
-            reader->start();
-            readers.push_back(std::move(reader));
+            if (!makeRoom()) {
+                refuseConnection(descriptor, serverBusy());
+                continue;
+            }
+            auto slot = std::make_shared<ReaderSlot>();
+            std::unique_ptr<QThread> thread(QThread::create([this, descriptor, slot] { serveConnection(descriptor, slot); }));
+            thread->setObjectName(QStringLiteral("remote-api-connection"));
+            thread->start();
+            readers.push_back({std::move(thread), std::move(slot)});
         }
+        serviceDraining(false);
     }
     m_listening = false;
     server.close();
     for (const qintptr descriptor : server.takePending()) {
-        refuseBusy(descriptor);
+        refuseConnection(descriptor, shuttingDown());
     }
     // The dispatcher answers what is still queued (503) before it ends; the
     // readers write those answers and end too.
     m_queueChanged.notify_all();
     dispatcher->wait();
-    for (const auto& reader : readers) {
-        reader->wait();
+    for (const Reader& reader : readers) {
+        reader.thread->wait();
+    }
+    // the last refusals: read briefly what their clients still send, then close
+    const QDeadlineTimer flush(StopFlushMs);
+    for (;;) {
+        serviceDraining(false);
+        {
+            const std::lock_guard<std::mutex> lock(m_drainMutex);
+            if (m_draining.empty()) {
+                break;
+            }
+        }
+        if (flush.hasExpired()) {
+            break;
+        }
+        msleep(DrainSliceMs);
+    }
+    serviceDraining(true);
+}
+
+void LC_RemoteApiServer::refuseConnection(const qintptr descriptor, const LC_ApiResponse& response) {
+    net::prepare(descriptor);
+    // one try: the answer is small and the new socket's buffer is empty; the
+    // accepting thread never waits for a client
+    const QByteArray data = LC_RemoteApiHttp::serializeResponse(response);
+    net::send(descriptor, data.constData(), data.size());
+    net::shutdownSending(descriptor);
+    drainLater(descriptor);
+}
+
+void LC_RemoteApiServer::refuseAndDrain(const qintptr descriptor, const LC_ApiResponse& response) {
+    if (!writeAll(descriptor, LC_RemoteApiHttp::serializeResponse(response))) {
+        net::abort(descriptor);
+        return;
+    }
+    net::shutdownSending(descriptor);
+    drainLater(descriptor);
+}
+
+void LC_RemoteApiServer::drainLater(const qintptr descriptor) {
+    std::vector<qintptr> overflow;
+    {
+        const std::lock_guard<std::mutex> lock(m_drainMutex);
+        m_draining.push_back({descriptor, QDeadlineTimer(DrainMs)});
+        while (m_draining.size() > MaxDraining) {
+            overflow.push_back(m_draining.front().descriptor);
+            m_draining.erase(m_draining.begin());
+        }
+    }
+    for (const qintptr closing : overflow) {
+        net::close(closing);
     }
 }
 
-void LC_RemoteApiServer::refuseBusy(const qintptr descriptor) const {
-    QTcpSocket socket;
-    if (!socket.setSocketDescriptor(descriptor)) {
+void LC_RemoteApiServer::serviceDraining(const bool closeAll) {
+    std::vector<Draining> current;
+    {
+        const std::lock_guard<std::mutex> lock(m_drainMutex);
+        current.swap(m_draining);
+    }
+    if (current.empty()) {
         return;
     }
-    const LC_ApiResponse response =
-        m_stop.load() ? shuttingDown()
-                      : LC_ApiError(503, QStringLiteral("server_busy"),
-                                    QStringLiteral("too many connections to the Remote API at once"),
-                                    {{QStringLiteral("hint"), QStringLiteral("retry in a moment")}})
-                            .toResponse();
-    socket.write(LC_RemoteApiHttp::serializeResponse(response));
-    socket.waitForBytesWritten(BusyWriteMs);
-    socket.abort();
+    std::vector<Draining> keep;
+    QByteArray buffer(ReadChunk, Qt::Uninitialized);
+    for (const Draining& draining : current) {
+        bool done = closeAll || draining.until.hasExpired();
+        for (qint64 budget = DrainReadBudget; budget > 0;) {
+            const qint64 n = net::read(draining.descriptor, buffer.data(), buffer.size());
+            if (n > 0) {
+                budget -= n;
+                continue;
+            }
+            if (n != -1) {
+                done = true; // the client ended its sending, or the connection failed
+            }
+            break;
+        }
+        if (done) {
+            net::close(draining.descriptor);
+        }
+        else {
+            keep.push_back(draining);
+        }
+    }
+    if (!keep.empty()) {
+        const std::lock_guard<std::mutex> lock(m_drainMutex);
+        m_draining.insert(m_draining.begin(), keep.cbegin(), keep.cend());
+    }
 }
 
 bool LC_RemoteApiServer::enqueue(const std::shared_ptr<Job>& job) {
@@ -265,9 +606,11 @@ void LC_RemoteApiServer::dispatchLoop() {
             job = m_queue.front();
             m_queue.pop_front();
         }
+        if (!job->take()) {
+            continue; // its reader dropped it: the client is gone, or was answered at its deadline
+        }
         if (job->clientGone.load()) {
-            // the client gave up while the request waited: it never runs
-            job->answer(LC_ApiResponse());
+            job->answer(LC_ApiResponse()); // nobody reads it
             continue;
         }
         if (m_stop.load()) {
@@ -275,11 +618,7 @@ void LC_RemoteApiServer::dispatchLoop() {
             continue;
         }
         if (job->clientDeadline.hasExpired()) {
-            job->answer(LC_ApiError(504, QStringLiteral("ui_timeout"),
-                                    QStringLiteral("the request waited past the client's deadline"),
-                                    {{QStringLiteral("started"), false},
-                                     {QStringLiteral("hint"), QStringLiteral("LibreCAD is busy; retry in a few seconds")}})
-                            .toResponse());
+            job->answer(waitedPastDeadline());
             continue;
         }
         const LC_RemoteApiGui::ClientScope scope(
@@ -288,40 +627,73 @@ void LC_RemoteApiServer::dispatchLoop() {
     }
 }
 
-void LC_RemoteApiServer::serveConnection(const qintptr descriptor) {
-    QTcpSocket socket;
-    if (!socket.setSocketDescriptor(descriptor)) {
-        return;
-    }
+void LC_RemoteApiServer::serveConnection(const qintptr descriptor, const std::shared_ptr<ReaderSlot>& slot) {
+    struct Finish {
+        ReaderSlot& slot;
+        ~Finish() { slot.phase = ReaderSlot::Finished; }
+    } finish{*slot};
+    Connection connection(descriptor);
     LC_HttpRequestParser parser(m_limits.maxHeaderBytes, m_limits.maxBodyBytes);
     const int headerTimeoutMs = qMin(m_limits.headerTimeoutMs, m_limits.readTimeoutMs);
     const QDeadlineTimer headerDeadline(headerTimeoutMs);
     const QDeadlineTimer readDeadline(m_limits.readTimeoutMs);
+    QByteArray buffer(ReadChunk, Qt::Uninitialized);
     bool timedOut = false;
+    bool evicted = false;
+    bool checked = false; // Host, Origin and the token
     while (parser.state() == LC_HttpRequestParser::State::Incomplete) {
         if (m_stop.load()) {
-            socket.abort();
-            return;
+            return; // reset
         }
-        if (socket.bytesAvailable() > 0) {
-            parser.feed(socket.read(ReadChunk));
+        if (slot->phase.load() == ReaderSlot::Evicted) {
+            evicted = true;
+            break;
+        }
+        const qint64 n = net::read(descriptor, buffer.data(), buffer.size());
+        if (n > 0) {
+            parser.feed(QByteArrayView(buffer.constData(), n));
+            if (!checked && parser.headersComplete() && parser.state() != LC_HttpRequestParser::State::Error) {
+                // before the body: a client without the token never gets to send it
+                checked = true;
+                if (const std::optional<LC_ApiResponse> refused = refusal(parser.request())) {
+                    refuseAndDrain(connection.release(), *refused);
+                    return;
+                }
+                int expected = ReaderSlot::Headers;
+                if (!slot->phase.compare_exchange_strong(expected, ReaderSlot::Request)) {
+                    evicted = true;
+                    break;
+                }
+            }
             continue;
         }
-        if (socket.state() != QAbstractSocket::ConnectedState) {
+        if (n == 0) { // the client ended its sending
             if (parser.isEmpty()) {
-                return; // opened and closed without a request
+                connection.close(); // opened and closed without a request
+                return;
             }
             parser.finish();
             break;
+        }
+        if (n == -2) {
+            return; // the connection failed
         }
         const QDeadlineTimer& deadline = parser.headersComplete() ? readDeadline : headerDeadline;
         if (deadline.hasExpired()) {
             timedOut = true;
             break;
         }
-        socket.waitForReadyRead(static_cast<int>(qMin<qint64>(PollSliceMs, qMax<qint64>(1, deadline.remainingTime()))));
+        net::waitFor(descriptor, false, static_cast<int>(qMin<qint64>(PollSliceMs, qMax<qint64>(1, deadline.remainingTime()))));
     }
 
+    if (evicted) {
+        refuseAndDrain(connection.release(),
+                       LC_ApiError(408, QStringLiteral("request_timeout"),
+                                   QStringLiteral("the request headers had not arrived when the Remote API needed "
+                                                  "this connection for another client"))
+                           .toResponse());
+        return;
+    }
     if (timedOut || parser.state() == LC_HttpRequestParser::State::Error) {
         const LC_ApiResponse refused =
             timedOut ? LC_ApiError(408, QStringLiteral("request_timeout"),
@@ -330,74 +702,74 @@ void LC_RemoteApiServer::serveConnection(const qintptr descriptor) {
                                        : QStringLiteral("the request headers were not received within %1 s").arg(headerTimeoutMs / 1000.0))
                            .toResponse()
                      : parser.error().toResponse();
-        if (writeAll(socket, LC_RemoteApiHttp::serializeResponse(refused))) {
-            drainAndClose(socket);
-        }
-        else {
-            socket.abort();
-        }
+        refuseAndDrain(connection.release(), refused);
         return;
     }
 
+    const bool http10 = parser.isHttp10();
+    auto job = std::make_shared<Job>();
+    job->request = parser.takeRequest();
+    job->clientDeadline = clientDeadline(job->request);
+    std::future<LC_ApiResponse> answer = job->promise.get_future();
     LC_ApiResponse response;
-    const LC_ApiRequest request = parser.takeRequest();
-    if (const std::optional<LC_ApiResponse> refused = refusal(request)) {
-        response = *refused;
-    }
-    else if (socket.state() != QAbstractSocket::ConnectedState) {
-        return; // the client is gone already: nothing runs for it
+    if (!enqueue(job)) {
+        response = shuttingDown();
     }
     else {
-        auto job = std::make_shared<Job>();
-        job->request = request;
-        job->clientDeadline = clientDeadline(request);
-        std::future<LC_ApiResponse> answer = job->promise.get_future();
-        if (!enqueue(job)) {
-            response = shuttingDown();
-        }
-        else {
-            // Watch the connection while the request waits. A client that closes
-            // it gives the request up: it then never runs, or, when it runs
-            // already, nobody waits for LibreCAD to finish it.
-            QDeadlineTimer stopping(QDeadlineTimer::Forever);
-            while (answer.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-                if (socket.bytesAvailable() > 0) {
-                    socket.read(ReadChunk); // nothing more is expected; ignore it
-                }
-                if (socket.state() != QAbstractSocket::ConnectedState) {
-                    job->clientGone = true;
-                    return;
-                }
-                if (m_stop.load()) {
-                    // the dispatcher answers 503 at once; do not wait for ever
-                    if (stopping.isForever()) {
-                        stopping = QDeadlineTimer(StopWaitMs);
-                    }
-                    else if (stopping.hasExpired()) {
-                        socket.abort();
-                        return;
-                    }
-                }
-                socket.waitForReadyRead(WatchSliceMs);
+        // Watch the client while the request waits or runs (see the class comment).
+        bool ended = false; // the client ended its sending
+        QDeadlineTimer stopping(QDeadlineTimer::Forever);
+        for (;;) {
+            if (answer.wait_for(std::chrono::milliseconds(WatchSliceMs)) == std::future_status::ready) {
+                response = answer.get();
+                break;
             }
-            response = answer.get();
+            // nothing more is expected from the client: what it sends is read and ignored
+            const qint64 n = net::read(descriptor, buffer.data(), buffer.size());
+            bool gone = n == -2;
+            if (n == 0 && !ended) {
+                ended = true;
+                if (!http10 && net::send(descriptor, InterimContinue, sizeof(InterimContinue) - 1) == -2) {
+                    gone = true;
+                }
+            }
+            if (gone) {
+                job->clientGone = true;
+                job->drop(); // still queued: it never runs
+                return;      // reset
+            }
+            if (job->clientDeadline.hasExpired() && job->drop()) {
+                // still queued at the client's deadline: answered now, and it never runs
+                response = waitedPastDeadline();
+                break;
+            }
+            if (m_stop.load()) {
+                // the dispatcher answers 503 at once; do not wait for ever
+                if (stopping.isForever()) {
+                    stopping = QDeadlineTimer(StopWaitMs);
+                }
+                else if (stopping.hasExpired()) {
+                    return; // reset
+                }
+            }
         }
     }
 
-    if (!writeAll(socket, LC_RemoteApiHttp::serializeResponse(response))) {
-        socket.abort();
-        return;
+    if (!writeAll(descriptor, LC_RemoteApiHttp::serializeResponse(response))) {
+        return; // reset
     }
-    socket.disconnectFromHost();
+    net::shutdownSending(descriptor);
+    // what the client sent meanwhile is read, so that closing does not reset the connection
+    while (net::read(descriptor, buffer.data(), buffer.size()) > 0) {
+    }
+    connection.close();
 }
 
-bool LC_RemoteApiServer::writeAll(QTcpSocket& socket, const QByteArray& data) const {
-    if (socket.state() != QAbstractSocket::ConnectedState || socket.write(data) != data.size()) {
-        return false;
-    }
+bool LC_RemoteApiServer::writeAll(const qintptr descriptor, const QByteArray& data) const {
     QDeadlineTimer deadline(m_limits.writeTimeoutMs);
     bool stopping = false;
-    while (socket.bytesToWrite() > 0) {
+    qint64 written = 0;
+    while (written < data.size()) {
         if (m_stop.load() && !stopping) {
             // still deliver this response (often the 503 of the stop itself),
             // but do not hold the stop up for a slow reader
@@ -406,29 +778,17 @@ bool LC_RemoteApiServer::writeAll(QTcpSocket& socket, const QByteArray& data) co
                 deadline = QDeadlineTimer(StopFlushMs);
             }
         }
-        if (deadline.hasExpired() || socket.state() != QAbstractSocket::ConnectedState) {
-            return false;
-        }
-        socket.waitForBytesWritten(PollSliceMs);
-    }
-    return true;
-}
-
-// A refused request may still be arriving. Closing a socket with unread data
-// resets the connection on some systems, and the client then loses the
-// response; read what comes for a short while first.
-void LC_RemoteApiServer::drainAndClose(QTcpSocket& socket) const {
-    const QDeadlineTimer deadline(DrainMs);
-    while (!deadline.hasExpired() && !m_stop.load() && socket.state() == QAbstractSocket::ConnectedState) {
-        if (socket.bytesAvailable() > 0) {
-            socket.read(ReadChunk);
+        const qint64 n = net::send(descriptor, data.constData() + written, data.size() - written);
+        if (n > 0) {
+            written += n;
             continue;
         }
-        if (!socket.waitForReadyRead(PollSliceMs)) {
-            break; // quiet or closed
+        if (n == -2 || deadline.hasExpired()) {
+            return false;
         }
+        net::waitFor(descriptor, true, static_cast<int>(qMin<qint64>(PollSliceMs, qMax<qint64>(1, deadline.remainingTime()))));
     }
-    socket.disconnectFromHost();
+    return true;
 }
 
 bool LC_RemoteApiServer::hostAllowed(const QByteArray& host) const {

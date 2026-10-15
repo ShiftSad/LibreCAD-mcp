@@ -23,6 +23,23 @@
 // authentication, Host and Origin checks, limits, GUI routes, binding, stop(),
 // and the controller with its discovery file and /status, without a main window.
 
+// First: a client here half-closes its connection through the native API.
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "ws2_32.lib")
+#endif
+#else
+#include <sys/socket.h>
+#endif
+
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -72,9 +89,24 @@ struct HttpReply {
     QString error() const { return json.value("error").toString(); }
 };
 
+// Ends the sending side of a client's connection (shutdown(SHUT_WR)): it can still read.
+void halfClose(QTcpSocket& socket) {
+#ifdef _WIN32
+    ::shutdown(static_cast<SOCKET>(socket.socketDescriptor()), SD_SEND);
+#else
+    ::shutdown(static_cast<int>(socket.socketDescriptor()), SHUT_WR);
+#endif
+}
+
+// How exchange() behaves, and what it saw.
+struct Exchange {
+    bool halfClose = false;  // end the sending after the request, as ncat or socat do
+    int interim = 0;         // interim 1xx answers before the final one (skipped)
+};
+
 // One exchange on a fresh connection: send request (may be empty: a silent
 // client), then read until the server closes or timeoutMs passes. Runs on any thread.
-HttpReply exchange(const quint16 port, const QByteArray& request, const int timeoutMs = 10000) {
+HttpReply exchange(const quint16 port, const QByteArray& request, const int timeoutMs = 10000, Exchange* options = nullptr) {
     HttpReply reply;
     QTcpSocket socket;
     socket.connectToHost(QHostAddress::LocalHost, port);
@@ -89,6 +121,9 @@ HttpReply exchange(const quint16 port, const QByteArray& request, const int time
         while (socket.bytesToWrite() > 0 && writing.elapsed() < 5000 &&
                socket.state() == QAbstractSocket::ConnectedState) {
             socket.waitForBytesWritten(100);
+        }
+        if (options != nullptr && options->halfClose) {
+            halfClose(socket);
         }
     }
     QByteArray data;
@@ -105,6 +140,16 @@ HttpReply exchange(const quint16 port, const QByteArray& request, const int time
         socket.waitForReadyRead(50);
     }
     data += socket.readAll();
+    while (data.startsWith("HTTP/1.1 1")) { // an interim answer: the final one follows
+        const qsizetype end = data.indexOf("\r\n\r\n");
+        if (end < 0) {
+            break;
+        }
+        data.remove(0, end + 4);
+        if (options != nullptr) {
+            ++options->interim;
+        }
+    }
     const qsizetype split = data.indexOf("\r\n\r\n");
     if (split < 0) {
         return reply;
@@ -417,19 +462,29 @@ TEST_CASE("Remote API server: the headers must come quickly", "[remote-api][serv
     CHECK(reply.status == 201);
 }
 
+namespace {
+// A connection that has sent its headers (with the token) and waits for its body.
+std::unique_ptr<QTcpSocket> partialRequest(const quint16 port, const QByteArray& token) {
+    auto socket = std::make_unique<QTcpSocket>();
+    socket->connectToHost(QHostAddress::LocalHost, port);
+    REQUIRE(socket->waitForConnected(5000));
+    socket->write("POST /api/v1/echo HTTP/1.1\r\nHost: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " + token +
+                  "\r\nContent-Length: 100\r\n\r\n{");
+    socket->waitForBytesWritten(1000);
+    return socket;
+}
+} // namespace
+
 TEST_CASE("Remote API server: connections over the limit are answered 503 at once", "[remote-api][server]") {
     Fixture fixture;
     LC_RemoteApiServer::Limits limits;
     limits.maxConnections = 2;
     const quint16 port = fixture.start(limits);
 
-    std::vector<std::unique_ptr<QTcpSocket>> idle;
-    for (int i = 0; i < 2; ++i) {
-        auto socket = std::make_unique<QTcpSocket>();
-        socket->connectToHost(QHostAddress::LocalHost, port);
-        REQUIRE(socket->waitForConnected(5000));
-        idle.push_back(std::move(socket));
-    }
+    // both readers are past their headers: neither gives way
+    std::vector<std::unique_ptr<QTcpSocket>> busy;
+    busy.push_back(partialRequest(port, fixture.token));
+    busy.push_back(partialRequest(port, fixture.token));
     std::this_thread::sleep_for(std::chrono::milliseconds(400)); // both are being read
     QElapsedTimer timer;
     timer.start();
@@ -438,9 +493,227 @@ TEST_CASE("Remote API server: connections over the limit are answered 503 at onc
     CHECK(reply.error() == "server_busy");
     CHECK(timer.elapsed() < 2500);
 
-    idle.clear(); // the readers see the connections close and end
+    // A client that sends its request a while after connecting still reads the
+    // 503: the refused connection is read before it closes, not reset.
+    for (int i = 0; i < 3; ++i) {
+        QTcpSocket late;
+        late.connectToHost(QHostAddress::LocalHost, port);
+        REQUIRE(late.waitForConnected(5000));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        late.write(get("/api/v1/ping", port, fixture.token));
+        late.waitForBytesWritten(1000);
+        QByteArray data;
+        QElapsedTimer reading;
+        reading.start();
+        while (reading.elapsed() < 3000 && !data.contains("\r\n\r\n")) {
+            if (late.bytesAvailable() > 0 || late.waitForReadyRead(100)) {
+                data += late.readAll();
+            }
+            if (late.state() != QAbstractSocket::ConnectedState) {
+                data += late.readAll();
+                break;
+            }
+        }
+        CHECK(data.startsWith("HTTP/1.1 503"));
+        CHECK(data.contains("server_busy"));
+    }
+
+    busy.clear(); // the readers see the connections close and end
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     CHECK(send(port, get("/api/v1/ping", port, fixture.token)).status == 200);
+}
+
+TEST_CASE("Remote API server: idle connections give way to a real client", "[remote-api][server]") {
+    Fixture fixture;
+    LC_RemoteApiServer::Limits limits;
+    limits.maxConnections = 2;
+    const quint16 port = fixture.start(limits); // 5 s for the headers
+
+    // every reader holds a connection that sends nothing (no token needed for that)
+    std::vector<std::unique_ptr<QTcpSocket>> idle;
+    for (int i = 0; i < 2; ++i) {
+        auto socket = std::make_unique<QTcpSocket>();
+        socket->connectToHost(QHostAddress::LocalHost, port);
+        REQUIRE(socket->waitForConnected(5000));
+        idle.push_back(std::move(socket));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    for (int round = 0; round < 3; ++round) {
+        QElapsedTimer timer;
+        timer.start();
+        const HttpReply reply = send(port, get("/api/v1/ping", port, fixture.token), 3000);
+        CHECK(reply.status == 200);
+        CHECK(timer.elapsed() < 1500); // not the 5 s header timeout
+        // and the idle ones come back for more
+        auto socket = std::make_unique<QTcpSocket>();
+        socket->connectToHost(QHostAddress::LocalHost, port);
+        REQUIRE(socket->waitForConnected(5000));
+        idle.push_back(std::move(socket));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    // the oldest idle connection was answered 408 to make room
+    QByteArray first;
+    QElapsedTimer reading;
+    reading.start();
+    while (reading.elapsed() < 2000 && !first.contains("\r\n\r\n")) {
+        if (idle.front()->bytesAvailable() > 0 || idle.front()->waitForReadyRead(100)) {
+            first += idle.front()->readAll();
+        }
+    }
+    CHECK(first.startsWith("HTTP/1.1 408"));
+}
+
+TEST_CASE("Remote API server refuses a client without the token before its body", "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start(); // 15 s to read a request
+    const QByteArray host = "Host: 127.0.0.1:" + QByteArray::number(port) + "\r\n";
+
+    QElapsedTimer timer;
+    timer.start();
+    // headers with a large Content-Length, and no body yet
+    HttpReply reply = send(port, "POST /api/v1/echo HTTP/1.1\r\n" + host + "Content-Length: 1000000\r\n\r\n{", 5000);
+    CHECK(reply.status == 401);
+    CHECK(reply.error() == "unauthorized");
+    CHECK(timer.elapsed() < 2000); // not the 15 s read timeout
+    timer.restart();
+    reply = send(port, "POST /api/v1/echo HTTP/1.1\r\nHost: evil.com\r\nX-Api-Token: " + fixture.token +
+                           "\r\nContent-Length: 1000000\r\n\r\n{", 5000);
+    CHECK(reply.status == 421);
+    CHECK(timer.elapsed() < 2000);
+}
+
+TEST_CASE("Remote API server answers a client that half-closes after its request", "[remote-api][server]") {
+    Fixture fixture;
+    std::atomic<int> runs{0};
+    LC_RouteOptions changes;
+    changes.capability = "test";
+    changes.changesDocument = true;
+    fixture.router.add("POST", "/api/v1/count", changes, [&runs](LC_ApiCall&) {
+        ++runs;
+        return LC_ApiResponse::ok({{"runs", runs.load()}}, 201);
+    });
+    const quint16 port = fixture.start();
+
+    Exchange halfClosed;
+    halfClosed.halfClose = true;
+    HttpReply reply;
+    runWhilePumping([&] { reply = exchange(port, get("/api/v1/ping", port, fixture.token), 10000, &halfClosed); });
+    CHECK(reply.status == 200);
+    CHECK(reply.json.value("pong").toBool());
+
+    runWhilePumping([&] { reply = exchange(port, get("/api/v1/gui", port, fixture.token), 10000, &halfClosed); });
+    CHECK(reply.status == 200);
+    CHECK(reply.json.value("on_gui_thread").toBool());
+
+    const QByteArray post = "POST /api/v1/count HTTP/1.1\r\nHost: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " +
+                            fixture.token + "\r\nContent-Length: 0\r\n\r\n";
+    runWhilePumping([&] { reply = exchange(port, post, 10000, &halfClosed); });
+    CHECK(reply.status == 201);
+    CHECK(runs.load() == 1); // it ran once, and its answer arrived
+
+    // HTTP/1.0 gets no interim answer
+    Exchange http10;
+    http10.halfClose = true;
+    runWhilePumping([&] {
+        reply = exchange(port, "GET /api/v1/ping HTTP/1.0\r\nHost: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " +
+                                   fixture.token + "\r\n\r\n", 10000, &http10);
+    });
+    CHECK(reply.status == 200);
+    CHECK(http10.interim == 0);
+}
+
+TEST_CASE("Remote API server answers a queued request at its client's deadline", "[remote-api][server]") {
+    Fixture fixture;
+    std::atomic<int> slowRuns{0};
+    std::atomic<int> quickRuns{0};
+    LC_RouteOptions gui;
+    gui.capability = "test";
+    gui.timeoutMs = 120000;
+    fixture.router.add("POST", "/api/v1/slow", gui, [&slowRuns](LC_ApiCall&) {
+        ++slowRuns;
+        return LC_ApiResponse::ok({});
+    });
+    fixture.router.add("POST", "/api/v1/quick", gui, [&quickRuns](LC_ApiCall&) {
+        ++quickRuns;
+        return LC_ApiResponse::ok({});
+    });
+    const quint16 port = fixture.start();
+    const QByteArray head = "Host: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " + fixture.token + "\r\n";
+
+    // The first request holds the dispatcher: nothing pumps the GUI thread yet.
+    HttpReply first;
+    std::thread holder([&] { first = exchange(port, "POST /api/v1/slow HTTP/1.1\r\n" + head + "Content-Length: 0\r\n\r\n", 20000); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    QElapsedTimer timer;
+    timer.start();
+    const HttpReply queued = exchange(port, "POST /api/v1/quick HTTP/1.1\r\n" + head +
+                                                "X-Request-Timeout-Ms: 400\r\nContent-Length: 0\r\n\r\n", 10000);
+    const qint64 waited = timer.elapsed();
+    CHECK(queued.status == 504);
+    CHECK(queued.error() == "ui_timeout");
+    CHECK_FALSE(queued.json.value("started").toBool(true));
+    CHECK(waited < 1500); // at its deadline, while the first one still waits
+
+    pumpFor(300); // LibreCAD is free again: the first one runs, the dropped one never
+    holder.join();
+    CHECK(first.status == 200);
+    CHECK(slowRuns.load() == 1);
+    pumpFor(200);
+    CHECK(quickRuns.load() == 0);
+}
+
+TEST_CASE("Remote API server: a queued request whose client closed never runs", "[remote-api][server]") {
+    Fixture fixture;
+    std::atomic<int> runs{0};
+    LC_RouteOptions gui;
+    gui.capability = "test";
+    fixture.router.add("POST", "/api/v1/slow", gui, [](LC_ApiCall&) { return LC_ApiResponse::ok({}); });
+    fixture.router.add("POST", "/api/v1/count", gui, [&runs](LC_ApiCall&) {
+        ++runs;
+        return LC_ApiResponse::ok({}, 201);
+    });
+    const quint16 port = fixture.start();
+    const QByteArray head = "Host: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " + fixture.token + "\r\n";
+
+    HttpReply first;
+    std::thread holder([&] { first = exchange(port, "POST /api/v1/slow HTTP/1.1\r\n" + head + "Content-Length: 0\r\n\r\n", 20000); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // queued behind it; the client gives up after 300 ms and closes its socket
+    const HttpReply abandoned = exchange(port, "POST /api/v1/count HTTP/1.1\r\n" + head + "Content-Length: 0\r\n\r\n", 300);
+    CHECK(abandoned.status == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // the reader finds it gone
+    pumpFor(300);
+    holder.join();
+    CHECK(first.status == 200);
+    CHECK(runs.load() == 0);
+}
+
+TEST_CASE("Remote API server answers small requests at once", "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start();
+    std::vector<qint64> times;
+    for (int i = 0; i < 25; ++i) {
+        QTcpSocket socket;
+        socket.connectToHost(QHostAddress::LocalHost, port);
+        REQUIRE(socket.waitForConnected(5000));
+        // from the request to the end of the answer (a server-thread route)
+        QElapsedTimer timer;
+        timer.start();
+        socket.write(get("/api/v1/ping", port, fixture.token));
+        socket.flush();
+        QByteArray data;
+        while (timer.elapsed() < 5000 && !data.contains("\"pong\":true")) {
+            if (socket.bytesAvailable() > 0 || socket.waitForReadyRead(5)) {
+                data += socket.readAll();
+            }
+        }
+        times.push_back(timer.nsecsElapsed() / 1000);
+        REQUIRE(data.startsWith("HTTP/1.1 200"));
+    }
+    std::sort(times.begin(), times.end());
+    // median under 25 ms (the reader that slept 50 ms per answer took 50 to 75)
+    CHECK(times.at(times.size() / 2) < 25000);
 }
 
 TEST_CASE("Remote API server: a request whose client gave up never runs", "[remote-api][server]") {
