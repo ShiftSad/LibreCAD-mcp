@@ -54,6 +54,47 @@ def test_windows_refusals(path, why):
     assert reason(path, windows=True, env={}) == why
 
 
+# --- the 8-bit file names of LibreCAD's drawing readers and writers -------------------------------
+# On Windows they reach the system in the ANSI code page, which turns a character it lacks into a
+# look-alike: a full-width backslash into '\', so the file opened is not the one the rules judged.
+
+@pytest.mark.parametrize("path,kind,fmt", [
+    ("C:\\cad\\..\uff3coutside\uff3cvictim.dxf", "save", "dxf"),   # '..\outside\victim.dxf': out of the root
+    ("C:\\cad\\\uff0fkeep.dxf", "export", "dxf"),                   # '/keep.dxf': an existing file, no overwrite
+    ("C:\\cad\\notes.txt\uff1aads.dwg", "export", "dwg"),           # ':': a stream of notes.txt
+    ("C:\\cad\\\uff23\uff2f\uff2d1.dxf", "export", "dxf"),          # full-width letters: COM1.dxf
+    ("C:\\cad\\plan\u0142.dxf", "save", "dxf"),                     # written as planl.dxf
+    ("C:\\cad\\..\uff3coutside\uff3csecret.dxf", "open", None),
+    ("C:\\cad\\\u4e2d.dwg", "open", None),
+])
+def test_names_the_ansi_code_page_cannot_carry_are_refused(path, kind, fmt):
+    assert reason(path, kind, fmt, windows=True, env={}, encoding="cp1252") == "bad_path"
+    with pytest.raises(BlockedByPolicy) as exc:
+        check_path(path, kind, fmt, windows=True, env={}, encoding="cp1252")
+    assert "U+" in exc.value.body["detail"] and "another file" in exc.value.body["detail"]
+
+
+def test_names_the_code_page_carries_and_files_qt_writes_pass():
+    assert check_path("C:\\cad\\Resid\u00eancia \u2013 planta.dxf", "save", "dxf", windows=True, env={},
+                      encoding="cp1252")
+    for fmt in ("pdf", "png", "svg"):
+        assert check_path(f"C:\\cad\\plan\u0142 \u4e2d.{fmt}", "export", fmt, windows=True, env={}, encoding="cp1252")
+
+
+def test_posix_file_names_are_utf8():
+    assert check_path("/cad/plan\u0142 \u4e2d.dxf", "save", "dxf", windows=False, env={}, encoding="utf-8")
+    assert reason("/cad/a\ud800.dxf", "save", "dxf", windows=False, env={}, encoding="utf-8") == "bad_path"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the ANSI code page of this Windows machine")
+def test_the_default_is_this_machines_ansi_code_page():
+    import ctypes
+    if ctypes.windll.kernel32.GetACP() == 65001:
+        pytest.skip("this machine's ANSI code page is UTF-8")
+    assert reason("C:\\cad\\..\uff3coutside\uff3cvictim.dxf", "save", "dxf", env={}) == "bad_path"
+    assert check_path("C:\\cad\\..\uff3coutside\uff3cvictim.png", "export", "png", env={})
+
+
 def test_network_paths_need_the_explicit_opt_in():
     env = {"LIBRECAD_MCP_ALLOW_NETWORK_PATHS": "1"}
     assert check_path(r"\\server\share\plan.dxf", "open", windows=True, env=env)

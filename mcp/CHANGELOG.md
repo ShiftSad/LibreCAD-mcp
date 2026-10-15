@@ -27,6 +27,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   extension rule for a file of another type, and the overwrite question names the file on disk.
 - `COM¹`..`COM³` and `LPT¹`..`LPT³` are refused as device names, like `COM1`, and so are names with
   spaces or dots before the extension (`COM1 .dxf`).
+- On Windows a path for open, save or a DXF/DWG export with a character outside the system's ANSI
+  code page is refused (`bad_path`), as LibreCAD now refuses it: LibreCAD hands drawing file names
+  to Windows in that code page, which turns a full-width `＼` into `\` (a path out of
+  `LIBRECAD_MCP_ALLOWED_ROOTS`) and `ł` into `l` (another file). PDF, PNG and SVG exports take any
+  name.
 
 ### Changed
 - Every request tells LibreCAD the client's deadline (`X-Request-Timeout-Ms`, a whole number of ms,

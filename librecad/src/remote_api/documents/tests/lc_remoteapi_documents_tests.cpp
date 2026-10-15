@@ -625,6 +625,64 @@ TEST_CASE("Remote API path policy refuses unsafe paths", "[remote-api][documents
 #endif
         CHECK(QFileInfo(kept).size() == 4);
     }
+
+    SECTION("a name the system's 8-bit file names cannot carry would read or write another file") {
+        // The drawing filters name files through QFile::encodeName(): the ANSI code page on Windows,
+        // which passes U+FF3C as '\', U+FF0F as '/', U+FF1A as ':', the full-width letters of
+        // "COM1" as COM1 and U+0142 as 'l' (code page 1252). UTF-8 elsewhere carries them all.
+        const auto survives = [](const QString& path) { return QFile::decodeName(QFile::encodeName(path)) == path; };
+        const QStringList names{QStringLiteral("inside/..＼outside＼victim.dxf"),
+                                QStringLiteral("inside/／existing.dxf"),
+                                QStringLiteral("inside/existing.dxf：ads.dxf"),
+                                QStringLiteral("inside/ＣＯＭ1.dxf"),
+                                QStringLiteral("inside/planł.dxf"),
+                                QStringLiteral("inside/中.dxf"),
+                                QStringLiteral("inside/") + QString::fromUtf8("\xf0\x9f\x98\x80") + QStringLiteral(".dxf"),
+                                QStringLiteral("inside/Residência.dxf")};
+        int refused = 0;
+        for (const QString& name : names) {
+            const QString path = dir.filePath(name);
+            CAPTURE(name, survives(path));
+            if (survives(path)) {
+                CHECK_FALSE(open.check(path, Access::Write, {".dxf"}).isEmpty());
+                continue;
+            }
+            ++refused;
+            CHECK(errorOf([&] { open.check(path, Access::Write, {".dxf"}, true); }) == Error{400, "bad_path"});
+            CHECK(errorOf([&] { open.check(path, Access::Write, {".dwg"}, true); }) == Error{400, "bad_path"});
+            CHECK(errorOf([&] { open.check(path, Access::Read); }) == Error{400, "bad_path"});
+            CHECK(errorOf([&] { open.check(path, Access::WriteInPlace); }) == Error{400, "bad_path"});
+            try {
+                open.check(path, Access::Write, {".dxf"});
+            }
+            catch (const LC_ApiError& e) {
+                const QJsonObject json = e.toResponse().json;
+                CHECK(json.value("character").toString().startsWith("U+"));
+                CHECK(json.value("detail").toString().contains("another file"));
+                CHECK_FALSE(json.value("hint").toString().isEmpty());
+            }
+            // PDF, PNG and SVG files are written through Qt, which takes any name
+            QString picture = path;
+            picture.chop(4);
+            for (const QString& extension : {QStringLiteral(".pdf"), QStringLiteral(".png"), QStringLiteral(".svg")}) {
+                CHECK_FALSE(open.check(picture + extension, Access::Write, {extension}).isEmpty());
+            }
+        }
+#ifdef Q_OS_WIN
+        if (GetACP() == 1252) {
+            CHECK(refused == names.size() - 1); // all but "Residência"
+            try {
+                open.check(dir.filePath(names.first()), Access::Write, {".dxf"});
+                FAIL("a full-width backslash was taken");
+            }
+            catch (const LC_ApiError& e) {
+                CHECK(e.toResponse().json.value("character").toString() == "U+FF3C");
+            }
+        }
+#endif
+        CAPTURE(refused);
+        CHECK(QFile(existing).size() == 6); // "0\nEOF\n": nothing was written
+    }
 }
 
 // ================================================================= documents
@@ -859,6 +917,36 @@ TEST_CASE("Remote API documents: export writes copies and leaves the drawing as 
         QDir().rmdir(junction); // removes the junction, not the folder it points at
     }
 #endif
+
+    SECTION("a name this system's file names cannot carry is refused, not written as another file") {
+        REQUIRE(QDir(temp.path()).mkpath("inside"));
+        REQUIRE(QDir(temp.path()).mkpath("outside"));
+        const QString victim = temp.filePath("outside/victim.dxf");
+        {
+            QFile file(victim);
+            REQUIRE(file.open(QIODevice::WriteOnly));
+            file.write("VICTIM");
+        }
+        // in code page 1252 this name is "..\outside\victim.dxf" to the DXF writer
+        const QString escaping = temp.filePath(QStringLiteral("inside/..＼outside＼victim.dxf"));
+        if (QFile::decodeName(QFile::encodeName(escaping)) == escaping) {
+            SKIP("this system's file names carry every character of the name");
+        }
+        for (const char* route : {"save_as", "export"}) {
+            CAPTURE(route);
+            const LC_ApiResponse refused = api.post(QStringLiteral("/api/v1/documents/%1").arg(QLatin1String(route)) + docQuery(window),
+                                                    {{"path", escaping}, {"format", "dxf"}, {"overwrite", true}});
+            CHECK(refused.status == 400);
+            CHECK(errorToken(refused) == "bad_path");
+            CHECK(refused.json.value("character").toString().startsWith("U+"));
+        }
+        CHECK(fileStart(victim, 16) == "VICTIM");
+        CHECK(LC_RemoteApiPathPolicy::sameFile(graphic->getFilename(), basePath));
+        // a PNG goes through Qt, which writes the name as it is
+        const QString png = temp.filePath(QStringLiteral("inside/planł.png"));
+        REQUIRE(api.post("/api/v1/documents/export" + docQuery(window), {{"path", png}, {"format", "png"}}).status == 200);
+        CHECK(fileStart(png, 8) == PngSignature);
+    }
 
     SECTION("PNG and SVG") {
         const QString png = temp.filePath("picture.png");
