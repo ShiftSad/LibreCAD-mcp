@@ -283,29 +283,28 @@ void QG_DlgOptionsDrawing::setupDimStylesTab() {
 }
 
 void QG_DlgOptionsDrawing::collectStylesUsage(QMap<QString, int>& map) const {
-    for (RS_Entity* e : m_graphic->getEntityList()) {
+    // The dimensions of model space, of the blocks and of the layouts, which
+    // no view shows but a save writes.
+    m_graphic->visitDrawingEntities([this, &map](RS_Entity* e) {
         auto entityType = e->rtti();
-        if (e->isDeleted()) {
-            continue;
-        }
 
         QString styleName;
         if (RS2::isDimensionalEntity(entityType)) {
             auto* dim = dynamic_cast<RS_Dimension*>(e);
             if (dim == nullptr) {
-                continue;
+                return;
             }
             styleName = dim->getStyle();
         }
         else if (entityType == RS2::EntityTolerance) {
             auto* tolerance = dynamic_cast<LC_Tolerance*>(e);
             if (tolerance == nullptr) {
-                continue;
+                return;
             }
             styleName = tolerance->getData().dimStyleName;
         }
         else {
-            continue;
+            return;
         }
 
         auto dimStyleForNameAndType = m_graphic->getDimStyleByName(styleName, entityType);
@@ -318,7 +317,7 @@ void QG_DlgOptionsDrawing::collectStylesUsage(QMap<QString, int>& map) const {
         else {
             // weird case - style is referenced in entity, but is not present in dim styles... looks like DXF error
         }
-    }
+    });
 }
 
 void QG_DlgOptionsDrawing::setupMetaTab() const {

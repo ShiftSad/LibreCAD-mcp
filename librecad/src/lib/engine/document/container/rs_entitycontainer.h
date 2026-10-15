@@ -158,7 +158,7 @@ public:
     virtual void adjustBorders(const RS_Entity* entity);
     void calculateBorders() override;
     void forcedCalculateBorders();
-    int updateDimensions(bool autoText = true);
+    virtual int updateDimensions(bool autoText = true);
     int updateVisibleDimensions(bool autoText = true);
     virtual void updateInserts();
     virtual void updateSplines();

@@ -40,7 +40,7 @@ class RS_EntityContainer;
  * LibreCAD shows and edits model space only. The entities a DWG or DXF keeps
  * on its layouts are held here, one container per paper-space block record,
  * out of model space and out of the block list: nothing draws, selects or
- * edits them, and a DXF save writes them back to their layouts
+ * edits them, and a save writes them back to their layouts
  * (RS_FilterDXFRW).
  *
  * "*Paper_Space" is the paper space of the active layout, and the only one an
@@ -101,8 +101,9 @@ public:
 
     /** Renames the block a paper-space INSERT refers to. */
     void renameInserts(const QString& oldName, const QString& newName);
-    /** Moves the entities on the layer named @p layerName to layer "0". */
-    void moveEntitiesToLayerZero(const QString& layerName);
+    /** Number of entities on the layer named @p layerName, deleted ones left
+     *  out. */
+    unsigned countOnLayer(const QString& layerName) const;
 
 private:
     Space* findSpace(const QString& name);

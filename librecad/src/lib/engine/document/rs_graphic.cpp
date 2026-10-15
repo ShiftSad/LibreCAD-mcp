@@ -35,6 +35,7 @@
 #include "lc_dimstyleslist.h"
 #include "lc_dimstyletovariablesmapper.h"
 #include "lc_paperspacestore.h"
+#include "rs_block.h"
 #include "rs_debug.h"
 #include "rs_dialogfactory.h"
 #include "rs_dialogfactoryinterface.h"
@@ -239,6 +240,35 @@ void RS_Graphic::renameInserts(const QString& oldName, const QString& newName) {
     m_paperSpaces->renameInserts(oldName, newName);
 }
 
+int RS_Graphic::updateDimensions(const bool autoText) {
+    // A save writes a layout's dimensions with what they are drawn with, as
+    // those of model space: they follow the same styles.
+    int updated = RS_Document::updateDimensions(autoText);
+    for (const auto& space : m_paperSpaces->spaces()) {
+        updated += space.entities->updateDimensions(autoText);
+    }
+    return updated;
+}
+
+void RS_Graphic::visitDrawingEntities(const std::function<void(RS_Entity*)>& visit) const {
+    const auto visitContainer = [&visit](const RS_EntityContainer& container) {
+        for (RS_Entity* entity : container) {
+            if (entity != nullptr && !entity->isDeleted()) {
+                visit(entity);
+            }
+        }
+    };
+    visitContainer(*this);
+    for (const RS_Block* block : m_blockList) {
+        if (block != nullptr && !block->isDeleted()) {
+            visitContainer(*block);
+        }
+    }
+    for (const auto& space : m_paperSpaces->spaces()) {
+        visitContainer(*space.entities);
+    }
+}
+
 /**
  * Counts the m_entities on the given layer.
  */
@@ -257,10 +287,20 @@ unsigned RS_Graphic::countLayerEntities(RS_Layer* layer) const {
 /**
  * Removes the given layer and undoes all m_entities on it.
  */
-void RS_Graphic::removeLayer(RS_Layer* layer) {
+bool RS_Graphic::removeLayer(RS_Layer* layer) {
     // fixme - move to other class?
     if (layer != nullptr) {
         const QString& layerName = layer->getName();
+        // What is on a layout stays as it is: nothing shows it, and moving it
+        // to layer 0 could not be undone.
+        const unsigned onLayouts = m_paperSpaces->countOnLayer(layerName);
+        if (layerName != "0" && onLayouts > 0) {
+            RS_DIALOGFACTORY->commandMessage(
+                QObject::tr("Layer \"%1\" is not removed: %n object(s) on the drawing's paper-space "
+                            "layouts are on it.", "RS_Graphic", static_cast<int>(onLayouts))
+                    .arg(layerName));
+            return false;
+        }
         if (layerName != "0") {
             std::vector<RS_Entity*> toRemove;
             //find entities on layer
@@ -301,13 +341,12 @@ void RS_Graphic::removeLayer(RS_Layer* layer) {
                 e->setLayer("0");
             }
 
-            // The entities of the layouts are kept, on layer 0.
-            m_paperSpaces->moveEntitiesToLayerZero(layerName);
-
             m_layerList.remove(layer);
         }
         validateSelection();
+        return layerName != "0";
     }
+    return false;
 }
 
 /**
@@ -1044,7 +1083,12 @@ void RS_Graphic::replaceDimStylesList(const QString& defaultStyleName, const QLi
 
 void RS_Graphic::prepareForSave() {
     // fixme - sand - check what if dimension
-    const auto entities = lc::LC_ContainerTraverser{*this, RS2::ResolveNone}.entities();
+    // The dimensions of the layouts are saved too.
+    auto entities = lc::LC_ContainerTraverser{*this, RS2::ResolveNone}.entities();
+    for (const auto& space : m_paperSpaces->spaces()) {
+        const auto onLayout = lc::LC_ContainerTraverser{*space.entities, RS2::ResolveNone}.entities();
+        entities.insert(entities.end(), onLayout.begin(), onLayout.end());
+    }
     QList<LC_DimStyle*> dimStyleOverrides;
     QList<RS_Dimension*> dimsWithOverrides;
     for (const auto e : entities) {

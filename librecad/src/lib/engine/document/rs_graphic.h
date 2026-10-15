@@ -26,6 +26,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <QDateTime>
 #include <memory>
@@ -109,12 +110,29 @@ public:
     /**
      * What the paper spaces of the layouts hold. Those entities are not in
      * model space nor in the block list: LibreCAD neither draws nor edits
-     * them, and a DXF save writes them back to their layouts.
+     * them, and a save writes them back to their layouts.
      */
     LC_PaperSpaceStore& paperSpaces() {return *m_paperSpaces;}
     const LC_PaperSpaceStore& paperSpaces() const {return *m_paperSpaces;}
     /** Renames the INSERTs of model space and of the paper spaces. */
     void renameInserts(const QString& oldName, const QString& newName) override;
+    /** Updates the dimensions of model space and of the paper spaces. */
+    int updateDimensions(bool autoText = true) override;
+    /**
+     * Calls @p visit with each entity the drawing holds itself: those of model
+     * space, of every block and of every layout's paper space, deleted ones
+     * and deleted blocks left out. An entity's own parts (the lines of a
+     * dimension, the glyphs of a text) are not visited.
+     */
+    void visitDrawingEntities(const std::function<void(RS_Entity*)>& visit) const;
+    /**
+     * Whether the import of a file into this drawing reports what it noticed
+     * (such as content kept on paper-space layouts) to the user. Only the
+     * opening of a document asks for it; a thumbnail, a template, a library
+     * preview or a style sample is read silently.
+     */
+    void setReportsImportNotices(bool report) { m_reportsImportNotices = report; }
+    bool reportsImportNotices() const { return m_reportsImportNotices; }
     /** @return pointer to the layout record matching @p handle, or nullptr. */
     const LC_Layout* findLayout(std::uint32_t handle) const;
 
@@ -165,7 +183,14 @@ public:
     void activateLayer(RS_Layer* layer, const bool notify = false) {m_layerList.activate(layer, notify);}
     RS_Layer* getActiveLayer() const {return m_layerList.getActive();}
     virtual void addLayer(RS_Layer* layer) {m_layerList.add(layer);}
-    void removeLayer(RS_Layer* layer);
+    /**
+     * Removes @p layer: the entities of model space on it are deleted
+     * (undoably), those of blocks move to layer 0. A layer that entities of
+     * the paper-space layouts are on is not removed: LibreCAD shows no layout,
+     * and could neither show nor undo what removing it did to them.
+     * @return false when the layer stays.
+     */
+    bool removeLayer(RS_Layer* layer);
     void editLayer(RS_Layer* layer, const RS_Layer& source) {m_layerList.edit(layer, source);}
     RS_Layer* findLayer(const QString& name) {return m_layerList.find(name);}
     void toggleLayer(const QString& name);
@@ -403,6 +428,8 @@ private:
 
     /** True when import repairs rewrote block defs and/or model placement. */
     bool m_importGeometryMutated = false;
+    /** See setReportsImportNotices(). */
+    bool m_reportsImportNotices = false;
 
     std::unique_ptr<LC_PlotSettings> m_plotSettings;
 };

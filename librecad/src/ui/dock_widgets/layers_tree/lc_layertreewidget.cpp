@@ -942,12 +942,21 @@ void LC_LayerTreeWidget::noPrintAllLayers(){
  */
 void LC_LayerTreeWidget::removeEmptyLayers(){
 
-    // first we inspect all entities ao collect found layers in set
+    // first we inspect all entities ao collect found layers in set: those of
+    // model space, of the blocks and of the layouts, which no view shows
     QSet<RS_Layer*> foundLayers;
-    for (const auto en: *m_document) {
+    const auto noteLayer = [&foundLayers](const RS_Entity* en) {
         RS_Layer *l = en->getLayer(true);
         if (l != nullptr){
             foundLayers.insert(l);
+        }
+    };
+    const RS_Graphic* graphic = m_document->getGraphic();
+    if (graphic != nullptr) {
+        graphic->visitDrawingEntities(noteLayer);
+    } else {
+        for (const auto en: *m_document) {
+            noteLayer(en);
         }
     }
 

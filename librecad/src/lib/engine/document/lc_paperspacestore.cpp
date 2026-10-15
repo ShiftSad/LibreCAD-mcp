@@ -135,14 +135,16 @@ void LC_PaperSpaceStore::renameInserts(const QString& oldName, const QString& ne
         space.entities->renameInserts(oldName, newName);
 }
 
-void LC_PaperSpaceStore::moveEntitiesToLayerZero(const QString& layerName) {
-    for (Space& space : m_spaces) {
-        for (RS_Entity* entity : *space.entities) {
-            if (entity == nullptr)
+unsigned LC_PaperSpaceStore::countOnLayer(const QString& layerName) const {
+    unsigned entities = 0;
+    for (const Space& space : m_spaces) {
+        for (const RS_Entity* entity : *space.entities) {
+            if (entity == nullptr || entity->getFlag(RS2::FlagDeleted))
                 continue;
             const RS_Layer* layer = entity->getLayer();
             if (layer != nullptr && layer->getName() == layerName)
-                entity->setLayer(QStringLiteral("0"));
+                ++entities;
         }
     }
+    return entities;
 }

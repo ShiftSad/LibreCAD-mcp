@@ -345,7 +345,7 @@ TEST_CASE("A drawing made on its layouts alone shows the active one in model spa
     CHECK(paperSpaceCount(graphic, QStringLiteral("*Paper_Space0")) == 2);
 }
 
-TEST_CASE("Layout entities follow a renamed block and a removed layer",
+TEST_CASE("Layout entities follow a renamed block and keep their layer",
           "[dxf][paper-space]") {
     REQUIRE(lc::test::ensureSettings());
     lc::test::QuietLog quiet;
@@ -365,9 +365,13 @@ TEST_CASE("Layout entities follow a renamed block and a removed layer",
     REQUIRE(paperSpaceCount(graphic, QStringLiteral("*Paper_Space")) == 4);
 
     graphic.renameInserts(QStringLiteral("XPaper_Space_Frame"), QStringLiteral("Frame"));
+    // A layer a layout's entity is on stays: nothing shows the layout, and
+    // moving its entities to layer 0 could not be undone.
     RS_Layer* layer = graphic.findLayer(QStringLiteral("FRAME"));
     REQUIRE(layer != nullptr);
-    graphic.removeLayer(layer);
+    CHECK(graphic.paperSpaces().countOnLayer(QStringLiteral("FRAME")) == 1);
+    CHECK_FALSE(graphic.removeLayer(layer));
+    CHECK(graphic.findLayer(QStringLiteral("FRAME")) == layer);
 
     const LC_PaperSpaceStore::Space* active =
         graphic.paperSpaces().find(QStringLiteral("*Paper_Space"));
@@ -380,7 +384,19 @@ TEST_CASE("Layout entities follow a renamed block and a removed layer",
     REQUIRE(insert != nullptr);
     CHECK(insert->getName() == QStringLiteral("Frame"));
     REQUIRE(insert->getLayer() != nullptr);
-    CHECK(insert->getLayer()->getName() == QStringLiteral("0"));
+    CHECK(insert->getLayer()->getName() == QStringLiteral("FRAME"));
+
+    // A layer only model space uses goes, as it always did.
+    graphic.addLayer(new RS_Layer(QStringLiteral("SCRATCH")));
+    RS_Layer* scratch = graphic.findLayer(QStringLiteral("SCRATCH"));
+    REQUIRE(scratch != nullptr);
+    CHECK(graphic.removeLayer(scratch));
+    CHECK(graphic.findLayer(QStringLiteral("SCRATCH")) == nullptr);
+
+    // Model space, the blocks and the layouts: 1 + 1 + 4 + 2 entities.
+    int visited = 0;
+    graphic.visitDrawingEntities([&visited](RS_Entity*) { ++visited; });
+    CHECK(visited == 8);
 }
 
 // Converts one drawing for a look with another program:
