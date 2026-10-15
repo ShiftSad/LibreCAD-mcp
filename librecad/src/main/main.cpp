@@ -368,6 +368,17 @@ int main(int argc, char** argv) {
     app.addLibraryPath(inconEnginesDir);
 
     auto applicationName = app.applicationName();
+    // librecad-mcp: LIBRECAD_SETTINGS_DIR keeps every setting in an INI file
+    // under that folder (<dir>/LibreCAD/LibreCAD-2.ini) instead of the user's
+    // store: sandboxed runs and the Remote API end-to-end test
+    const QString settingsDir = qEnvironmentVariable("LIBRECAD_SETTINGS_DIR");
+    if (!settingsDir.isEmpty()) {
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        for (const QSettings::Format format : {QSettings::IniFormat, QSettings::NativeFormat}) {
+            QSettings::setPath(format, QSettings::UserScope, settingsDir);
+            QSettings::setPath(format, QSettings::SystemScope, settingsDir + QStringLiteral("/system"));
+        }
+    }
     RS_Settings::init(app.organizationName(), applicationName);
 
     QGuiApplication::setDesktopFileName("librecad");
@@ -460,6 +471,7 @@ int main(int argc, char** argv) {
     if (showVersionInTitle) {
         mainWinTitle = applicationName + " [" + versionStr + "]";
     }
+    mainWinTitle += QStringLiteral(" MCP"); // librecad-mcp: build identity of the fork
 
     appWin.setWindowTitle(mainWinTitle);
 

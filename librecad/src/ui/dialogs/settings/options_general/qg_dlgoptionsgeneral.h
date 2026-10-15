@@ -29,6 +29,7 @@
 #include "lc_dialog.h"
 #include "ui_qg_dlgoptionsgeneral.h"
 
+class LC_RemoteApiOptionsWidget; // librecad-mcp: Remote API tab
 class QColor;
 class QComboBox;
 class QString;
@@ -111,6 +112,7 @@ protected slots:
     void exportSettings();
     void importSettings();
 private:
+    LC_RemoteApiOptionsWidget* m_remoteApiTab = nullptr; // librecad-mcp: "Remote API (MCP)" tab
     bool m_restartNeeded=false;
     QString m_originalLibraryPath;
     bool m_originalExpandedToolsMenuTillEntity {false};
