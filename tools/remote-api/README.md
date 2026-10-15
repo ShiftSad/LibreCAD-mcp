@@ -33,7 +33,10 @@ What happens:
 
 1. A temporary folder gets `settings/LibreCAD/LibreCAD-2.ini` with the first-start dialog, the
    splash and the update check turned off and the Remote API enabled on a free port with a random
-   token (section `[RemoteAPI]`).
+   token (section `[RemoteAPI]`). Its `[Paths]` section sets `OtherSettingsDir` to the same
+   folder, so the command alias and workspace files LibreCAD writes stay there too. A development
+   build has no `resources/fonts` next to the executable: `Fonts` and `Patterns` then point at
+   this checkout's `librecad/support/fonts` and `patterns` (text needs the font "standard").
 2. LibreCAD starts with `LIBRECAD_SETTINGS_DIR=<tmp>/settings`, so it reads those settings
    instead of yours and writes its discovery file to `<tmp>/settings/remote-api.json`, and with
    `QT_QPA_PLATFORM=offscreen`, so no window appears. If a deployed package has no

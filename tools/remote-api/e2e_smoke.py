@@ -467,10 +467,11 @@ class Runner:
 # Starting LibreCAD
 
 
-def settings_ini(port: int, token: str) -> str:
+def settings_ini(port: int, token: str, paths: dict[str, str] | None = None) -> str:
     """The settings LibreCAD starts with: no first-start dialog, no splash, no update
-    check, and the Remote API enabled (DESIGN.md 5.3 step 1)."""
-    return (
+    check, and the Remote API enabled (DESIGN.md 5.3 step 1). `paths` becomes the
+    [Paths] section (see sandbox_paths)."""
+    text = (
         "[Startup]\n"
         "FirstLoad=false\n"
         "ShowSplash=false\n"
@@ -484,6 +485,36 @@ def settings_ini(port: int, token: str) -> str:
         "AllowCommands=true\n"
         "AllowNetworkPaths=false\n"
     )
+    if paths:
+        text += "\n[Paths]\n" + "".join(f"{key}={value}\n" for key, value in paths.items())
+    return text
+
+
+def deployed_support_dir(exe: Path, sub: str) -> Path | None:
+    """The folder a deployed LibreCAD loads `sub` (fonts, patterns) from, if there is one
+    (the places RS_System::getDirectoryList looks next to the executable)."""
+    base = exe.parent
+    candidates = [base / "resources" / sub, base.parent / "Resources" / sub]
+    for name in ("librecad", "LibreCAD"):
+        candidates += [base.parent / "share" / name / sub, base.parent / "share" / "doc" / name / sub,
+                       base.parent / "lib" / name / sub, base.parent / "lib64" / name / sub]
+    return next((c for c in candidates if c.is_dir()), None)
+
+
+def sandbox_paths(exe: Path, settings_dir: Path) -> dict[str, str]:
+    """[Paths] for a sandboxed run.
+
+    OtherSettingsDir keeps the files LibreCAD writes next to its settings (command
+    aliases, workspaces, pen palettes, shortcuts) in the sandbox instead of the user's
+    application data folder. A development build has no fonts or hatch patterns next to
+    it, so they come from this checkout: text needs the font "standard" (DESIGN.md 6,
+    risk 6; without it every text spec is 422 invalid_entity)."""
+    paths = {"OtherSettingsDir": settings_dir.as_posix()}
+    for key, sub in (("Fonts", "fonts"), ("Patterns", "patterns")):
+        source = REPO_ROOT / "librecad" / "support" / sub
+        if deployed_support_dir(exe, sub) is None and source.is_dir():
+            paths[key] = source.as_posix()
+    return paths
 
 
 def offscreen_plugin_available(exe: Path) -> bool:
@@ -514,7 +545,8 @@ class LaunchedApp:
     def write_settings(self) -> Path:
         ini = self.settings_dir / SETTINGS_ORG / f"{SETTINGS_APP}.ini"
         ini.parent.mkdir(parents=True, exist_ok=True)
-        ini.write_text(settings_ini(self.port, self.token), encoding="utf-8")
+        ini.write_text(settings_ini(self.port, self.token, sandbox_paths(self.exe, self.settings_dir)),
+                       encoding="utf-8")
         return ini
 
     def start(self) -> None:
@@ -1634,6 +1666,16 @@ def run_selftest(args: argparse.Namespace) -> int:
             r.check("[RemoteAPI] enables the API with port and token",
                     parser.get("RemoteAPI", "Enabled") == "true" and parser.get("RemoteAPI", "Port") == str(port)
                     and parser.get("RemoteAPI", "Token") == token and len(token) == 32)
+            r.check("[Paths] keeps LibreCAD's other files in the sandbox",
+                    parser.get("Paths", "OtherSettingsDir", fallback="") == app.settings_dir.as_posix())
+            support = REPO_ROOT / "librecad" / "support"
+            if (support / "fonts").is_dir():
+                r.check("a development build gets the checkout's fonts and patterns",
+                        parser.get("Paths", "Fonts", fallback="") == (support / "fonts").as_posix()
+                        and parser.get("Paths", "Patterns", fallback="") == (support / "patterns").as_posix())
+            (fake_exe.parent / "resources" / "fonts").mkdir(parents=True)
+            paths = sandbox_paths(fake_exe, app.settings_dir)
+            r.check("a package with its own fonts keeps them", "Fonts" not in paths, short(paths))
             r.check("no discovery file yet -> None", read_discovery(app.discovery) is None)
             app.discovery.write_text("{not json", encoding="utf-8")
             r.check("a partial discovery file -> None", read_discovery(app.discovery) is None)
