@@ -203,6 +203,15 @@ bool readableWithin(const NativeSocket s, const int ms) {
     return ::select(static_cast<int>(s) + 1, &set, nullptr, nullptr, &timeout) > 0;
 }
 
+void setSendTimeout(const NativeSocket s, const int ms) {
+#ifdef _WIN32
+    const DWORD timeout = static_cast<DWORD>(ms);
+#else
+    timeval timeout{ms / 1000, (ms % 1000) * 1000};
+#endif
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+}
+
 // How exchange() behaves, and what it saw.
 struct Exchange {
     bool halfClose = false;  // end the sending after the request, as ncat or socat do
@@ -1206,6 +1215,72 @@ TEST_CASE("Remote API server: a request dropped while queued leaves the queue wi
     CHECK(first.status == 200);
     pumpFor(200);
     CHECK(runs.load() == 0);
+}
+
+TEST_CASE("Remote API server: a refused client still sending reads its answer while many more are refused",
+          "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start();
+
+    // A, without the token, sends a 1 MB body slowly: it is refused (401) at its headers, and read while it sends
+    const NativeSocket a = connectNative(port);
+    REQUIRE(a != NoSocket);
+    REQUIRE(sendNative(a, "POST /api/v1/echo HTTP/1.1\r\nHost: 127.0.0.1:" + QByteArray::number(port) +
+                              "\r\nContent-Length: 1000000\r\n\r\n"));
+    std::atomic<bool> stop{false};
+    std::thread trickle([&] {
+        const QByteArray chunk(1024, 'x');
+        while (!stop.load() && sendNative(a, chunk)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // then 100 more refusals within its second: more than the 64 refused connections read at once
+    std::vector<NativeSocket> others;
+    for (int i = 0; i < 100; ++i) {
+        const NativeSocket s = connectNative(port);
+        REQUIRE(s != NoSocket);
+        REQUIRE(sendNative(s, get("/api/v1/ping", port, {})));
+        others.push_back(s);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stop = true;
+    trickle.join();
+    // closing A, which still sent, would have reset it: its 401 lost
+    CHECK(receiveNative(a, "\r\n\r\n").startsWith("HTTP/1.1 401"));
+    int answered = 0;
+    for (const NativeSocket s : others) {
+        answered += receiveNative(s, "\r\n\r\n").startsWith("HTTP/1.1 ") ? 1 : 0; // 401, or 503 in a burst
+        closeNative(s);
+    }
+    CHECK(answered == 100);
+    closeNative(a);
+    CHECK(send(port, get("/api/v1/ping", port, fixture.token)).status == 200);
+}
+
+TEST_CASE("Remote API server reads a refused client's body as fast as it comes", "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start();
+    // 413 from Content-Length alone; this client sends its body all the same before it reads the answer
+    constexpr qint64 Total = 48 * 1024 * 1024;
+    const NativeSocket s = connectNative(port);
+    REQUIRE(s != NoSocket);
+    setSendTimeout(s, 5000);
+    REQUIRE(sendNative(s, "POST /api/v1/echo HTTP/1.1\r\nHost: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " +
+                              fixture.token + "\r\nContent-Length: " + QByteArray::number(Total) + "\r\n\r\n"));
+    const QByteArray chunk(256 * 1024, 'x');
+    qint64 sent = 0;
+    QElapsedTimer timer;
+    timer.start();
+    while (sent < Total && sendNative(s, chunk)) {
+        sent += chunk.size();
+    }
+    CAPTURE(sent, timer.elapsed());
+    // all of it within the second a refused connection is read (it was read one MiB per 20 ms slice:
+    // some 25 MB, then reset)
+    CHECK(sent == Total);
+    CHECK(receiveNative(s, "\r\n\r\n").startsWith("HTTP/1.1 413"));
+    closeNative(s);
 }
 
 TEST_CASE("Remote API server: a second server cannot take the port", "[remote-api][server]") {

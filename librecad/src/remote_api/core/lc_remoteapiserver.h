@@ -83,8 +83,9 @@ class LC_RemoteApiRouter;
  * more is answered 503 server_busy. At most maxIncoming connections may still
  * be sending their headers; when one more arrives, the oldest of them that has
  * nothing waiting to be read is closed (408) to make room. Refused connections
- * are read for a short while before they close, so that the client reads the
- * refusal instead of a reset.
+ * are read for up to a second before they close, so that the client reads the
+ * refusal instead of a reset; at most 64 at a time, and when more are refused
+ * at once, the ones whose client is not expected to send more close first.
  *
  * The router and the context must outlive the server; the server only reads
  * the router (routes are added before start()).
@@ -150,15 +151,20 @@ private:
     bool readIncoming(Incoming& incoming, QByteArray& buffer, Readers& readers);
     // Steps 2 and the reader's start, for a connection whose headers are in.
     void admit(Incoming& incoming, Readers& readers);
-    // Answers a connection on the accepting thread (one try: the answer is small).
-    void refuseConnection(qintptr descriptor, const LC_ApiResponse& response);
+    // Answers a connection on the accepting thread (one try: the answer is
+    // small). sending: the client is expected to send more (its body, or the
+    // rest of its request), so it is read for longest (see drainLater).
+    void refuseConnection(qintptr descriptor, const LC_ApiResponse& response, bool sending);
     // Writes a refusal, then hands the connection to the accepting thread.
     void refuseAndDrain(qintptr descriptor, const LC_ApiResponse& response);
-    // The accepting thread reads what the client still sends for a short while,
-    // then closes the connection: closing it with unread data would reset it,
-    // and the client would lose the answer.
-    void drainLater(qintptr descriptor);
-    void serviceDraining(bool closeAll);       // the accepting thread
+    // The accepting thread reads what the client still sends for up to a
+    // second, then closes the connection: closing it with unread data would
+    // reset it, and the client would lose the answer. Any thread.
+    void drainLater(qintptr descriptor, bool sending);
+    // The accepting thread: reads the refused connections, closes the ones
+    // that are done, and keeps at most MaxDraining (closing first the ones
+    // whose client is not expected to send more).
+    void serviceDraining(bool closeAll);
     bool enqueue(const std::shared_ptr<Job>& job);
     // A reader that dropped its job takes it out of the queue, with its body.
     void forget(const std::shared_ptr<Job>& job);
@@ -193,6 +199,7 @@ private:
     struct Draining {
         qintptr descriptor = 0;
         QDeadlineTimer until;
+        bool sending = false;   // the client is expected to send more, or did
     };
     std::mutex m_drainMutex;
     std::vector<Draining> m_draining;
