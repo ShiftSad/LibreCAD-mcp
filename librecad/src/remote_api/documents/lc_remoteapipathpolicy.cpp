@@ -21,13 +21,19 @@
 
 #include "lc_remoteapipathpolicy.h"
 
+#include <cstring>
+#include <optional>
+
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonObject>
 
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
+#else
+#include <sys/stat.h>
 #endif
 
 #include "lc_remoteapitypes.h"
@@ -145,6 +151,65 @@ QString canonicalForm(const QString& normalizedPath) {
     return base + rest.join(QLatin1Char('/'));
 }
 
+/** Which file on which volume: the same for every name of one file. */
+struct FileIdentity {
+    quint64 volume = 0;
+    quint64 high = 0;
+    quint64 low = 0;
+    bool operator==(const FileIdentity& other) const {
+        return volume == other.volume && high == other.high && low == other.low;
+    }
+};
+
+/**
+ * The identity of an existing file: on Windows its volume serial number and
+ * file id (GetFileInformationByHandleEx), on POSIX st_dev and st_ino. Every
+ * name of the file has it: through a junction or symbolic link, an 8.3 alias,
+ * or a hard link. nullopt when the file cannot be opened.
+ */
+std::optional<FileIdentity> identityOf(const QString& path) {
+    if (!QFileInfo::exists(path)) {
+        return std::nullopt;
+    }
+#ifdef Q_OS_WIN
+    const std::wstring native = longNativeName(QFileInfo(path).absoluteFilePath());
+    const HANDLE handle = CreateFileW(native.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return std::nullopt;
+    }
+    std::optional<FileIdentity> identity;
+    FILE_ID_INFO idInfo{};
+    BY_HANDLE_FILE_INFORMATION basic{};
+    if (GetFileInformationByHandleEx(handle, FileIdInfo, &idInfo, sizeof(idInfo))) {
+        FileIdentity id;
+        id.volume = idInfo.VolumeSerialNumber;
+        static_assert(sizeof(idInfo.FileId.Identifier) == 16, "a 128-bit file id");
+        std::memcpy(&id.high, idInfo.FileId.Identifier, 8);
+        std::memcpy(&id.low, idInfo.FileId.Identifier + 8, 8);
+        identity = id;
+    }
+    else if (GetFileInformationByHandle(handle, &basic)) {
+        FileIdentity id;
+        id.volume = basic.dwVolumeSerialNumber;
+        id.high = basic.nFileIndexHigh;
+        id.low = basic.nFileIndexLow;
+        identity = id;
+    }
+    CloseHandle(handle);
+    return identity;
+#else
+    struct stat status{};
+    if (::stat(QFile::encodeName(path).constData(), &status) != 0) {
+        return std::nullopt;
+    }
+    FileIdentity id;
+    id.volume = static_cast<quint64>(status.st_dev);
+    id.low = static_cast<quint64>(status.st_ino);
+    return id;
+#endif
+}
+
 /** The first control character (U+0000..U+001F, U+007F) of text, or -1. */
 qsizetype controlCharacter(const QString& text) {
     for (qsizetype i = 0; i < text.size(); ++i) {
@@ -190,10 +255,18 @@ bool LC_RemoteApiPathPolicy::sameFile(const QString& a, const QString& b) {
     if (a.isEmpty() || b.isEmpty()) {
         return false;
     }
+    // Two existing names: the same file on disk, whatever leads to it (a
+    // junction, a symbolic link, an 8.3 alias, a hard link).
+    const std::optional<FileIdentity> identityA = identityOf(a);
+    const std::optional<FileIdentity> identityB = identityOf(b);
+    if (identityA.has_value() && identityB.has_value()) {
+        return *identityA == *identityB;
+    }
+    // Otherwise the names, with every link on the way resolved.
     const auto normalize = [](const QString& path) {
-        const QFileInfo info(path);
-        const QString canonical = info.exists() ? info.canonicalFilePath() : QString();
-        return canonical.isEmpty() ? QDir::cleanPath(info.absoluteFilePath()) : canonical;
+        const QString clean = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+        const QString canonical = canonicalForm(clean);
+        return canonical.isEmpty() ? clean : canonical;
     };
     return normalize(a).compare(normalize(b), PathCase) == 0;
 }
@@ -296,8 +369,37 @@ QString LC_RemoteApiPathPolicy::check(const QString& path, const Access access, 
     if (info.isDir()) {
         fail(400, "bad_path", QStringLiteral("the path names a folder, not a file"), normalized);
     }
+
+    // An existing file is judged by its own name too: on Windows the 8.3 alias
+    // "KEEPME~1.DXF" names "keepme.dxfold", and a symbolic link "a.dxf" may lead
+    // to "notes.txt". Writing through either would replace a file the rules
+    // below never saw.
+    QString resolved;
+    QString resolvedName;
+    if (info.exists()) {
+        resolved = resolvedExisting(normalized);
+        if (resolved.isEmpty() && !extensions.isEmpty()) {
+            fail(400, "bad_path", QStringLiteral("the existing file cannot be resolved to its own name"), normalized);
+        }
+        const QString name = QFileInfo(resolved).fileName();
+        if (!name.isEmpty() && name.compare(info.fileName(), PathCase) != 0) {
+            resolvedName = name;
+        }
+    }
+    const auto reject = [&](const int status, const char* token, const QString& detail, QJsonObject extra = {}) {
+        if (!resolvedName.isEmpty()) {
+            extra.insert(QStringLiteral("resolved"), resolved);
+        }
+        fail(status, token, detail, normalized, extra);
+    };
+    QStringList names{info.fileName()};
+    if (!resolvedName.isEmpty()) {
+        names << resolvedName;
+    }
+
 #ifdef Q_OS_WIN
-    // "COM1.dxf", "NUL.svg", "CONIN$.dxf": a device on Windows before 11, not a file
+    // "COM1.dxf", "NUL.svg", "CONIN$.dxf", "COM\u00b9.dxf": a device on Windows before 11,
+    // not a file (the superscript digits are reserved like the plain ones)
     static const QStringList devices{QStringLiteral("CON"),    QStringLiteral("PRN"),     QStringLiteral("AUX"),
                                      QStringLiteral("NUL"),    QStringLiteral("CONIN$"),  QStringLiteral("CONOUT$"),
                                      QStringLiteral("COM1"),   QStringLiteral("COM2"),    QStringLiteral("COM3"),
@@ -305,22 +407,33 @@ QString LC_RemoteApiPathPolicy::check(const QString& path, const Access access, 
                                      QStringLiteral("COM7"),   QStringLiteral("COM8"),    QStringLiteral("COM9"),
                                      QStringLiteral("LPT1"),   QStringLiteral("LPT2"),    QStringLiteral("LPT3"),
                                      QStringLiteral("LPT4"),   QStringLiteral("LPT5"),    QStringLiteral("LPT6"),
-                                     QStringLiteral("LPT7"),   QStringLiteral("LPT8"),    QStringLiteral("LPT9")};
-    if (devices.contains(info.fileName().section(QLatin1Char('.'), 0, 0).trimmed(), Qt::CaseInsensitive)) {
-        fail(400, "bad_path", QStringLiteral("'%1' is a reserved Windows device name").arg(info.fileName()), normalized);
+                                     QStringLiteral("LPT7"),   QStringLiteral("LPT8"),    QStringLiteral("LPT9"),
+                                     QStringLiteral("COM\u00b9"), QStringLiteral("COM\u00b2"), QStringLiteral("COM\u00b3"),
+                                     QStringLiteral("LPT\u00b9"), QStringLiteral("LPT\u00b2"), QStringLiteral("LPT\u00b3")};
+    for (const QString& name : std::as_const(names)) {
+        // "COM1 .dxf" and "COM1..dxf" are COM1 as well
+        if (devices.contains(name.section(QLatin1Char('.'), 0, 0).trimmed(), Qt::CaseInsensitive)) {
+            reject(400, "bad_path", QStringLiteral("'%1' is a reserved Windows device name").arg(name));
+        }
     }
 #endif
 
     if (!extensions.isEmpty()) {
-        const QString suffix = QLatin1Char('.') + info.suffix().toLower();
-        bool known = false;
-        for (const QString& extension : extensions) {
-            known = known || extension.compare(suffix, Qt::CaseInsensitive) == 0;
-        }
-        if (!known || info.suffix().isEmpty()) {
-            fail(422, "extension_mismatch",
-                 QStringLiteral("the file extension must be %1").arg(extensions.join(QStringLiteral(" or "))),
-                 normalized, {{QStringLiteral("allowed"), toArray(extensions)}});
+        for (const QString& name : std::as_const(names)) {
+            const QString suffix = QFileInfo(name).suffix();
+            bool known = false;
+            for (const QString& extension : extensions) {
+                known = known || extension.compare(QLatin1Char('.') + suffix, Qt::CaseInsensitive) == 0;
+            }
+            if (!known || suffix.isEmpty()) {
+                const QString wanted = extensions.join(QStringLiteral(" or "));
+                reject(422, "extension_mismatch",
+                       name == info.fileName()
+                           ? QStringLiteral("the file extension must be %1").arg(wanted)
+                           : QStringLiteral("'%1' names the existing file '%2', whose extension is not %3")
+                                 .arg(info.fileName(), name, wanted),
+                       {{QStringLiteral("allowed"), toArray(extensions)}});
+            }
         }
     }
 
