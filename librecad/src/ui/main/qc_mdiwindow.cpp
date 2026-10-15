@@ -358,9 +358,12 @@ bool QC_MDIWindow::loadDocumentFromTemplate(const QString& fileName, const RS2::
  * Opens the given file in this MDI window.
  */
 bool QC_MDIWindow::loadDocument(const QString& fileName, const RS2::FormatType type,
-                               const RS2::DxfTextEncoding encoding) {
+                               const RS2::DxfTextEncoding encoding,
+                               LC_ImportErrorHandler onImportError) {
     removeWidgetsListeners();
-    const bool loaded = LC_DocumentsStorage{}.loadDocument(m_document, fileName, type, encoding);
+    // librecad-mcp: onImportError
+    const bool loaded = LC_DocumentsStorage{}.loadDocument(m_document, fileName, type, encoding,
+                                                           std::move(onImportError));
     if (loaded) {
         const RS_Graphic* graphic = m_document->getGraphic();
         if (graphic != nullptr) {

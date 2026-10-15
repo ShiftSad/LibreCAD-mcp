@@ -25,6 +25,8 @@
 **********************************************************************/
 #ifndef QC_MDIWINDOW_H
 #define QC_MDIWINDOW_H
+#include <functional>
+
 #include <QMdiSubWindow>
 #include <QPointer>
 
@@ -34,6 +36,9 @@ class QG_GraphicView;
 class LC_ActionContext;
 class LC_LayoutTabBar;
 class RS_EventHandler;
+// librecad-mcp: answers import errors in place of RS_FileIO's message boxes (see RS_FileIO::fileImport);
+// a plain name, as moc garbles the function type in a slot signature
+using LC_ImportErrorHandler = std::function<bool(bool, const QString&)>;
 /**
  * MDI document window. Contains a document and a view (window).
  *
@@ -49,8 +54,10 @@ public slots:
     void slotPenChanged(const RS_Pen &pen) const;
     void slotFileNew() const;
     bool loadDocumentFromTemplate(const QString &fileName, RS2::FormatType type) const;
+    // librecad-mcp: onImportError (see RS_FileIO::fileImport) replaces the import error boxes
     bool loadDocument(const QString &fileName, RS2::FormatType type,
-                      RS2::DxfTextEncoding encoding = RS2::DxfTextEncoding::Declared);
+                      RS2::DxfTextEncoding encoding = RS2::DxfTextEncoding::Declared,
+                      LC_ImportErrorHandler onImportError = nullptr);
     bool saveDocument(bool &cancelled, bool isAutoSave = false);
     bool autoSaveDocument(QString &autosaveFileName) const;
     bool saveDocumentAs(bool &cancelled);

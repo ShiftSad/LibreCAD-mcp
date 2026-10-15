@@ -186,12 +186,14 @@ bool LC_DocumentsStorage::loadDocument(const RS_Document *document, const QStrin
 }
 
 bool LC_DocumentsStorage::loadDocument(const RS_Document* document, const QString& fileName, const RS2::FormatType type,
-                                      const RS2::DxfTextEncoding encoding) const {
+                                      const RS2::DxfTextEncoding encoding,
+                                      std::function<bool(bool, const QString&)> onImportError) const {
     bool result = false;
     if (document != nullptr && !fileName.isEmpty()) {
         // cosmetics..
         qApp->processEvents(QEventLoop::AllEvents, 1000);
-        result = loadGraphic(document->getGraphic(), fileName, type, encoding);
+        // librecad-mcp: onImportError
+        result = loadGraphic(document->getGraphic(), fileName, type, encoding, std::move(onImportError));
     } else {
         //statusBar()->showMessage(tr("Opening aborted"), 2000);
     }
@@ -234,10 +236,12 @@ bool LC_DocumentsStorage::loadGraphicFromTemplate(RS_Graphic* graphic, const QSt
 }
 
 bool LC_DocumentsStorage::loadGraphic(RS_Graphic* graphic, const QString &filename, const RS2::FormatType type,
-                                     const RS2::DxfTextEncoding encoding) const {
+                                     const RS2::DxfTextEncoding encoding,
+                                     std::function<bool(bool, const QString&)> onImportError) const {
     graphic->initForNewDocument();
 
-    const bool ret = RS_FileIO::instance()->fileImport(*graphic, filename, type, nullptr, encoding);
+    // librecad-mcp: onImportError (null: RS_FileIO shows its error boxes, as before)
+    const bool ret = RS_FileIO::instance()->fileImport(*graphic, filename, type, std::move(onImportError), encoding);
 
     if (ret) {
         graphic->onLoadingCompleted();
