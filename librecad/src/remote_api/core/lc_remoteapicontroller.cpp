@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -65,14 +64,14 @@ QString platformName() {
 #endif
 }
 
-QString documentName(QC_MDIWindow* window) {
-    const QString fileName = window->getFileName();
-    if (!fileName.isEmpty()) {
-        return QFileInfo(fileName).fileName();
+// Unknown query parameters are refused, as everywhere (doc is always accepted).
+void allowNoQuery(const LC_ApiRequest& request) {
+    for (auto it = request.query.cbegin(); it != request.query.cend(); ++it) {
+        if (it.key() != QLatin1String("doc")) {
+            throw LC_ApiError(400, QStringLiteral("unknown_field"), QStringLiteral("unknown query parameter '%1'").arg(it.key()),
+                              {{QStringLiteral("field"), it.key()}, {QStringLiteral("allowed"), QJsonArray{QStringLiteral("doc")}}});
+        }
     }
-    QString title = window->windowTitle();
-    title.remove(QStringLiteral("[*]"));
-    return title.trimmed();
 }
 
 QString activeActionName(const QG_GraphicView* view) {
@@ -121,6 +120,30 @@ int LC_RemoteApiController::mcpBuild() {
     return LC_MCP_RELEASE;
 }
 
+QString LC_RemoteApiController::releaseTag() {
+#ifdef LC_MCP_TAG
+    return QString::fromLatin1(LC_REMOTE_API_XSTR(LC_MCP_TAG));
+#else
+    // v<version without its label>-mcp.<build>; a git describe value may start with "v"
+    QString version = appVersion().section(QLatin1Char('-'), 0, 0);
+    if (version.startsWith(QLatin1Char('v'))) {
+        version.remove(0, 1);
+    }
+    return QStringLiteral("v%1-mcp.%2").arg(version).arg(mcpBuild());
+#endif
+}
+
+QString LC_RemoteApiController::mcpSourceDir() {
+#ifdef LC_MCP_SOURCE_DIR
+    const QString dir = QString::fromUtf8(LC_MCP_SOURCE_DIR);
+    if (QFileInfo::exists(dir + QStringLiteral("/pyproject.toml")) &&
+        QFileInfo::exists(dir + QStringLiteral("/src/librecad_mcp/server.py"))) {
+        return dir;
+    }
+#endif
+    return {};
+}
+
 bool LC_RemoteApiController::isListening() const {
     return m_server != nullptr && m_server->isListening();
 }
@@ -137,7 +160,8 @@ void LC_RemoteApiController::registerMetaRoutes() {
     status.summary = QStringLiteral("App and API version, capabilities, open documents, GUI state");
     status.gui = false;
     status.timeoutMs = 5000;
-    m_router.add("GET", QStringLiteral("/api/v1/status"), status, [this, status](LC_ApiCall&) {
+    m_router.add("GET", QStringLiteral("/api/v1/status"), status, [this, status](LC_ApiCall& call) {
+        allowNoQuery(call.request);
         return LC_RemoteApiGui::run([this] { return LC_ApiResponse::ok(statusJson()); }, status.timeoutMs,
                                     QStringLiteral("GET /api/v1/status"), LC_RemoteApiGui::ModalPolicy::Allow);
     });
@@ -146,7 +170,8 @@ void LC_RemoteApiController::registerMetaRoutes() {
     routes.capability = QStringLiteral("routes");
     routes.summary = QStringLiteral("Every route of this build with its capability and timeout");
     routes.gui = false;
-    m_router.add("GET", QStringLiteral("/api/v1/routes"), routes, [this](LC_ApiCall&) {
+    m_router.add("GET", QStringLiteral("/api/v1/routes"), routes, [this](LC_ApiCall& call) {
+        allowNoQuery(call.request);
         return LC_ApiResponse::ok(QJsonObject{{QStringLiteral("api_version"), QLatin1String(ApiVersion)},
                                               {QStringLiteral("routes"), m_router.describe()}});
     });
@@ -174,7 +199,7 @@ QJsonObject LC_RemoteApiController::statusJson() const {
         const QString path = window->getFileName();
         documents.append(QJsonObject{
             {QStringLiteral("id"), static_cast<double>(window->getId())},
-            {QStringLiteral("name"), documentName(window)},
+            {QStringLiteral("name"), LC_RemoteApiContext::documentName(window)},
             {QStringLiteral("path"), path.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(path)},
             {QStringLiteral("modified"), window->isModified()},
             {QStringLiteral("active"), window == active},

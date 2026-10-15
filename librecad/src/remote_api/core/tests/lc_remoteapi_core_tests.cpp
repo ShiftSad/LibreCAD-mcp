@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -42,6 +41,7 @@
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
@@ -795,6 +795,202 @@ TEST_CASE("Remote API GUI runner: abortWaiting answers 503 at once", "[remote-ap
     pumpFor(50);
 }
 
+TEST_CASE("Remote API GUI runner: a stop before the post is not missed", "[remote-api][core][gui]") {
+    (void)lc::test::application();
+    // The server run started at this generation; a stop() came after the
+    // request was read but before its task was posted.
+    const quint64 runStarted = LC_RemoteApiGui::abortGeneration();
+    LC_RemoteApiGui::abortWaiting();
+    std::atomic<bool> ran{false};
+    int status = 0;
+    QElapsedTimer timer;
+    timer.start();
+    std::thread worker([&] {
+        const LC_RemoteApiGui::ClientScope scope(runStarted, [] { return false; }, QDeadlineTimer(QDeadlineTimer::Forever));
+        try {
+            LC_RemoteApiGui::run([&] {
+                ran = true;
+                return LC_ApiResponse::ok({});
+            }, 120000, "POST /api/v1/documents/open");
+        }
+        catch (const LC_ApiError& e) {
+            status = e.status;
+            CHECK(e.token == "shutting_down");
+        }
+    });
+    worker.join();
+    CHECK(status == 503);
+    CHECK(timer.elapsed() < 2000); // not the 120 s route timeout
+    pumpFor(50);
+    CHECK_FALSE(ran.load()); // never posted
+}
+
+TEST_CASE("Remote API GUI runner: a client that is gone, or past its deadline, stops the wait", "[remote-api][core][gui]") {
+    (void)lc::test::application();
+    std::atomic<bool> ran{false};
+    std::atomic<bool> gone{false};
+    int status = 0;
+    bool started = true;
+    // nothing pumps the GUI thread: the task stays pending
+    std::thread worker([&] {
+        const LC_RemoteApiGui::ClientScope scope(LC_RemoteApiGui::abortGeneration(), [&gone] { return gone.load(); },
+                                                 QDeadlineTimer(QDeadlineTimer::Forever));
+        try {
+            LC_RemoteApiGui::run([&] {
+                ran = true;
+                return LC_ApiResponse::ok({});
+            }, 120000, "POST /api/v1/entities");
+        }
+        catch (const LC_ApiError& e) {
+            status = e.status;
+            started = e.extra.value("started").toBool(true);
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    gone = true;
+    worker.join();
+    CHECK(status == 499);
+    CHECK_FALSE(started);
+    pumpFor(100);
+    CHECK_FALSE(ran.load()); // the client gave up before it started: it never runs
+
+    status = 0;
+    QElapsedTimer timer;
+    timer.start();
+    std::thread deadline([&] {
+        const LC_RemoteApiGui::ClientScope scope(LC_RemoteApiGui::abortGeneration(), [] { return false; }, QDeadlineTimer(200));
+        try {
+            LC_RemoteApiGui::run([&] {
+                ran = true;
+                return LC_ApiResponse::ok({});
+            }, 120000, "POST /api/v1/documents/save");
+        }
+        catch (const LC_ApiError& e) {
+            status = e.status;
+            started = e.extra.value("started").toBool(true);
+            CHECK(e.token == "ui_timeout");
+        }
+    });
+    deadline.join();
+    CHECK(status == 504);
+    CHECK_FALSE(started);
+    CHECK(timer.elapsed() < 5000); // the client's 200 ms, not the route's 120 s
+    pumpFor(100);
+    CHECK_FALSE(ran.load());
+}
+
+TEST_CASE("Remote API GUI runner waits while user code pumps events", "[remote-api][core][gui]") {
+    (void)lc::test::application();
+    std::atomic<bool> ran{false};
+    std::atomic<bool> done{false};
+    LC_ApiResponse response;
+    std::thread worker;
+    {
+        // as openFile(): the user's code pumps events in the middle of its work
+        const LC_RemoteApiGui::UserBusyScope busy;
+        CHECK(LC_RemoteApiGui::userBusy() == 1);
+        worker = std::thread([&] {
+            response = LC_RemoteApiGui::run([&] {
+                ran = true;
+                return LC_ApiResponse::ok({});
+            }, 10000, "POST /api/v1/documents/close");
+            done = true;
+        });
+        pumpFor(300);
+        CHECK_FALSE(ran.load());
+    }
+    CHECK(LC_RemoteApiGui::userBusy() == 0);
+    QElapsedTimer timer;
+    timer.start();
+    while (!done.load() && timer.elapsed() < 10000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    worker.join();
+    CHECK(ran.load());
+    CHECK(response.status == 200);
+}
+
+TEST_CASE("Remote API GUI runner never runs a task inside the user's popup menu", "[remote-api][core][gui]") {
+    (void)lc::test::application();
+    QWidget host;
+    host.resize(200, 200);
+    host.show();
+    QMenu menu(&host);
+    menu.addAction(QStringLiteral("Item"));
+
+    std::atomic<bool> ran{false};
+    std::atomic<bool> ranInsideMenu{false};
+    std::atomic<bool> done{false};
+    bool ranBeforeClose = true;
+    LC_ApiResponse response;
+    std::thread worker([&] {
+        response = LC_RemoteApiGui::run([&] {
+            ran = true;
+            ranInsideMenu = QApplication::activePopupWidget() != nullptr;
+            return LC_ApiResponse::ok({});
+        }, 10000, "POST /api/v1/documents/close");
+        done = true;
+    });
+    // the menu's own loop delivers the posted task; it must wait for the menu
+    QTimer::singleShot(400, &menu, [&] {
+        ranBeforeClose = ran.load();
+        menu.close();
+    });
+    QTimer failsafe;
+    failsafe.setSingleShot(true);
+    QObject::connect(&failsafe, &QTimer::timeout, &menu, &QMenu::close);
+    failsafe.start(5000);
+    menu.exec(host.mapToGlobal(QPoint(10, 10)));
+    failsafe.stop();
+    QElapsedTimer timer;
+    timer.start();
+    while (!done.load() && timer.elapsed() < 10000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    worker.join();
+    CHECK_FALSE(ranBeforeClose);
+    CHECK(ran.load());
+    CHECK_FALSE(ranInsideMenu.load());
+    CHECK(response.status == 200);
+}
+
+TEST_CASE("Remote API reads JSON null as an absent key, nested ones too", "[remote-api][core][router]") {
+    (void)lc::test::application();
+    LC_ApiRequest request;
+    request.method = "POST";
+    request.path = "/api/v1/x";
+    request.body = R"({"a":null,"b":{"c":null,"d":1},"e":[null,{"f":null,"g":2}],"h":"x"})";
+    LC_RemoteApiContext context(nullptr);
+    LC_ApiCall call(request, context);
+    const QJsonObject body = call.body().raw();
+    CHECK_FALSE(body.contains("a"));
+    CHECK(body.value("b").toObject() == QJsonObject{{"d", 1}});
+    const QJsonArray e = body.value("e").toArray();
+    REQUIRE(e.size() == 2);
+    CHECK(e.at(0).isNull()); // a value, not a key: it stays
+    CHECK(e.at(1).toObject() == QJsonObject{{"g", 2}});
+    CHECK(body.value("h").toString() == "x");
+}
+
+TEST_CASE("Remote API context refuses a doc given twice", "[remote-api][core][context]") {
+    (void)lc::test::application();
+    LC_RemoteApiContext context(nullptr);
+    LC_ApiRequest request;
+    request.query.insert("doc", "0");
+    request.query.insert("doc", "1");
+    try {
+        (void)context.resolve(request);
+        FAIL("resolve() accepted two doc values");
+    }
+    catch (const LC_ApiError& e) {
+        CHECK(e.status == 400);
+        CHECK(e.token == "bad_param");
+        CHECK(e.extra.value("param").toString() == "doc");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Modal guard
 
@@ -917,15 +1113,37 @@ TEST_CASE("Remote API Preferences tab edits the RemoteAPI settings", "[remote-ap
     const QString snippet = widget.mcpConfigSnippet();
     const QJsonObject server = QJsonDocument::fromJson(snippet.toUtf8())
                                    .object().value("mcpServers").toObject().value("librecad").toObject();
-    CHECK(server.value("command").toString() == "uvx");
+    // no token and no URL: the server reads both from the discovery file, so the
+    // entry survives Regenerate and a port change, and holds no secret
+    CHECK(server.value("env").isObject());
+    CHECK(server.value("env").toObject().isEmpty());
+    CHECK_FALSE(snippet.contains(second));
     const QJsonArray args = server.value("args").toArray();
-    REQUIRE(args.size() == 3);
-    CHECK(args.at(1).toString().startsWith("git+https://github.com/ShiftSad/LibreCAD-mcp@v"));
-    CHECK(args.at(1).toString().endsWith(QString("-mcp.%1#subdirectory=mcp").arg(LC_RemoteApiController::mcpBuild())));
-    CHECK_FALSE(args.at(1).toString().contains("alpha")); // the tag has no pre-release label
-    CHECK(args.at(2).toString() == "librecad-mcp");
-    CHECK(server.value("env").toObject().value("LIBRECAD_API_TOKEN").toString() == second);
-    CHECK(server.value("env").toObject().value("LIBRECAD_API_URL").toString() == "http://127.0.0.1:14000");
+    const QString sourceDir = LC_RemoteApiController::mcpSourceDir();
+    if (!sourceDir.isEmpty()) {
+        // a build of this checkout runs the checkout's server
+        CHECK(server.value("command").toString() == "uv");
+        REQUIRE(args.size() == 5);
+        CHECK(args.at(0).toString() == "run");
+        CHECK(args.at(1).toString() == "--frozen");
+        CHECK(args.at(2).toString() == "--directory");
+        CHECK(QDir::cleanPath(QDir::fromNativeSeparators(args.at(3).toString())) == QDir::cleanPath(sourceDir));
+        CHECK(args.at(4).toString() == "librecad-mcp");
+    }
+    else {
+        CHECK(server.value("command").toString() == "uvx");
+        REQUIRE(args.size() == 3);
+        CHECK(args.at(1).toString() ==
+              QString("git+https://github.com/ShiftSad/LibreCAD-mcp@%1#subdirectory=mcp").arg(LC_RemoteApiController::releaseTag()));
+        CHECK(args.at(2).toString() == "librecad-mcp");
+    }
+    // the release tag: v<LibreCAD version without its label>-mcp.<build>, never a describe string
+    const QString tag = LC_RemoteApiController::releaseTag();
+    CHECK(tag.startsWith("v"));
+    CHECK_FALSE(tag.startsWith("vv"));
+    CHECK(tag.endsWith(QString("-mcp.%1").arg(LC_RemoteApiController::mcpBuild())));
+    CHECK_FALSE(tag.contains("alpha"));
+    CHECK(tag == "v" + LC_RemoteApiController::appVersion().section(QLatin1Char('-'), 0, 0) + QString("-mcp.%1").arg(LC_RemoteApiController::mcpBuild()));
 
     widget.save(); // QG_DlgOptionsGeneral::ok()
     const LC_RemoteApiConfig saved = LC_RemoteApiConfig::load();

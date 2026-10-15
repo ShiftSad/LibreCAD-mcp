@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -268,6 +267,7 @@ QByteArray reasonPhrase(const int status) {
         case 421: return "Misdirected Request";
         case 422: return "Unprocessable Content";
         case 431: return "Request Header Fields Too Large";
+        case 499: return "Client Closed Request";
         case 500: return "Internal Server Error";
         case 501: return "Not Implemented";
         case 503: return "Service Unavailable";

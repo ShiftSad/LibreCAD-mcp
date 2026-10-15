@@ -9,6 +9,9 @@
 # Build number of the LibreCAD-mcp fork, reported by /status as "mcp_build".
 # Keep it equal to the value in remote_api.cmake.
 DEFINES += LC_MCP_RELEASE=1
+# The release tag of this build (see remote_api.cmake); unquoted, the code
+# stringifies it as it does LC_VERSION. Keep it equal to remote_api.cmake.
+DEFINES += LC_MCP_TAG=v2.2.2.6-mcp.1
 
 include($$PWD/core/core.pri)
 

@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -47,6 +46,35 @@ QStringList requestSegments(const LC_ApiRequest& request) {
     return segments;
 }
 
+// A JSON null reads as an absent key (design section 2.1): drop null members
+// from the body's objects, nested ones too (entity specs, hatch loops), so that
+// no handler sees them. Nulls inside arrays stay: they are values, not keys.
+QJsonValue withoutNullKeys(const QJsonValue& value);
+
+QJsonObject withoutNullKeys(const QJsonObject& object) {
+    QJsonObject out;
+    for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
+        if (!it.value().isNull()) {
+            out.insert(it.key(), withoutNullKeys(it.value()));
+        }
+    }
+    return out;
+}
+
+QJsonValue withoutNullKeys(const QJsonValue& value) {
+    if (value.isObject()) {
+        return withoutNullKeys(value.toObject());
+    }
+    if (value.isArray()) {
+        QJsonArray out;
+        for (const QJsonValue& item : value.toArray()) {
+            out.append(withoutNullKeys(item));
+        }
+        return out;
+    }
+    return value;
+}
+
 void appendWarnings(LC_ApiResponse& response, const QJsonArray& warnings) {
     if (warnings.isEmpty() || !response.raw.isEmpty()) {
         return;
@@ -77,7 +105,7 @@ const LC_JsonReader& LC_ApiCall::body() {
                 throw LC_ApiError(400, QStringLiteral("body_must_be_object"),
                                   QStringLiteral("the request body must be a JSON object"));
             }
-            m_body.emplace(document.object());
+            m_body.emplace(withoutNullKeys(document.object()));
         }
     }
     return *m_body;

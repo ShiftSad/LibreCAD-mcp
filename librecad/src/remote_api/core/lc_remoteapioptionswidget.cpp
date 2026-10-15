@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -100,9 +99,9 @@ LC_RemoteApiOptionsWidget::LC_RemoteApiOptionsWidget(QWidget* parent, const LC_R
     auto* clientsBox = new QGroupBox(tr("MCP clients"), this);
     auto* clientsLayout = new QVBoxLayout(clientsBox);
     auto* clientsText = new QLabel(
-        tr("The librecad-mcp server finds this LibreCAD through the discovery file below, "
+        tr("The librecad-mcp server finds this LibreCAD and its token through the discovery file below, "
            "so a client on this computer needs no further setup. "
-           "\"Copy MCP config\" copies a ready .mcp.json entry with the token."),
+           "\"Copy MCP config\" copies a ready .mcp.json entry; it holds no token."),
         clientsBox);
     clientsText->setWordWrap(true);
     clientsLayout->addWidget(clientsText);
@@ -176,21 +175,26 @@ void LC_RemoteApiOptionsWidget::save() const {
 }
 
 QString LC_RemoteApiOptionsWidget::mcpConfigSnippet() const {
-    // release tags are v<version>-mcp.<build> without the pre-release label:
-    // LC_VERSION 2.2.2.6-alpha, build 1 -> v2.2.2.6-mcp.1
-    const QString version = LC_RemoteApiController::appVersion().section(QLatin1Char('-'), 0, 0);
-    const QString source = QStringLiteral("git+https://github.com/ShiftSad/LibreCAD-mcp@v%1-mcp.%2#subdirectory=mcp")
-                               .arg(version)
-                               .arg(LC_RemoteApiController::mcpBuild());
-    QJsonObject env{{QStringLiteral("LIBRECAD_API_TOKEN"), m_token}};
-    if (m_sbPort->value() != LC_RemoteApiConfig::DefaultPort) {
-        env.insert(QStringLiteral("LIBRECAD_API_URL"), QStringLiteral("http://127.0.0.1:%1").arg(m_sbPort->value()));
+    // No token and no URL: the server reads both from the discovery file on every
+    // call, so the entry keeps working after Regenerate or a port change, and can
+    // be committed with a project's .mcp.json.
+    QJsonObject server;
+    const QString sourceDir = LC_RemoteApiController::mcpSourceDir();
+    if (!sourceDir.isEmpty()) {
+        // a development build: the server of this very checkout
+        server.insert(QStringLiteral("command"), QStringLiteral("uv"));
+        server.insert(QStringLiteral("args"),
+                      QJsonArray{QStringLiteral("run"), QStringLiteral("--frozen"), QStringLiteral("--directory"),
+                                 QDir::toNativeSeparators(sourceDir), QStringLiteral("librecad-mcp")});
     }
-    const QJsonObject server{
-        {QStringLiteral("command"), QStringLiteral("uvx")},
-        {QStringLiteral("args"), QJsonArray{QStringLiteral("--from"), source, QStringLiteral("librecad-mcp")}},
-        {QStringLiteral("env"), env},
-    };
+    else {
+        // the server of this build's release tag (v<version>-mcp.<build>)
+        const QString source = QStringLiteral("git+https://github.com/ShiftSad/LibreCAD-mcp@%1#subdirectory=mcp")
+                                   .arg(LC_RemoteApiController::releaseTag());
+        server.insert(QStringLiteral("command"), QStringLiteral("uvx"));
+        server.insert(QStringLiteral("args"), QJsonArray{QStringLiteral("--from"), source, QStringLiteral("librecad-mcp")});
+    }
+    server.insert(QStringLiteral("env"), QJsonObject());
     const QJsonObject root{{QStringLiteral("mcpServers"), QJsonObject{{QStringLiteral("librecad"), server}}}};
     return QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented));
 }
@@ -221,8 +225,8 @@ void LC_RemoteApiOptionsWidget::onRegenerateToken() {
     }
     m_token = token;
     m_leToken->setText(m_token);
-    m_lTokenNote->setText(tr("New token: it takes effect when you press OK, and clients using the old token "
-                             "(an MCP config copied before) must be updated."));
+    m_lTokenNote->setText(tr("New token: it takes effect when you press OK. MCP servers that read the discovery "
+                             "file pick it up; a client given the old token (LIBRECAD_API_TOKEN) must be updated."));
     m_lTokenNote->setVisible(true);
     updateEnabledState();
 }

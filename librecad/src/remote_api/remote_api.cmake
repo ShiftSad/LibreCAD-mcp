@@ -16,6 +16,12 @@
 # Build number of the LibreCAD-mcp fork, reported by /status as "mcp_build".
 # Keep it equal to the value in remote_api.pri.
 set(LC_MCP_RELEASE 1)
+# The release tag of this build, v<LibreCAD version>-mcp.<build>: LC_VERSION
+# without its label (2.2.2.6-alpha -> 2.2.2.6). Fixed here, never derived from
+# git describe (qmake builds put that into LC_VERSION). "Copy MCP config" pins
+# the server source to it; mcp/scripts/cut-release.sh checks it. Keep it equal
+# to the value in remote_api.pri.
+set(LC_MCP_TAG v2.2.2.6-mcp.${LC_MCP_RELEASE})
 
 set(LC_REMOTE_API_SOURCES)
 set(LC_REMOTE_API_INCLUDES)
@@ -30,3 +36,10 @@ file(GLOB LC_REMOTE_API_FRAGMENTS CONFIGURE_DEPENDS
 include(${CMAKE_CURRENT_LIST_DIR}/core/core.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/entities/entities.cmake OPTIONAL)
 include(${CMAKE_CURRENT_LIST_DIR}/documents/documents.cmake OPTIONAL)
+
+# Only the controller reads the release tag and the server source (keeps the
+# rest of librecad_lib from rebuilding when they change). LC_MCP_SOURCE_DIR is
+# the mcp/ folder of this checkout: "Copy MCP config" runs the server from it
+# while it exists (a development build), else from git at LC_MCP_TAG.
+set_property(SOURCE librecad/src/remote_api/core/lc_remoteapicontroller.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+             LC_MCP_TAG=${LC_MCP_TAG} "LC_MCP_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}/mcp\"")

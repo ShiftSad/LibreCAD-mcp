@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -26,7 +25,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -131,6 +132,16 @@ void runWhilePumping(const std::function<void()>& work) {
     }
     worker.join();
     REQUIRE(done.load());
+}
+
+// Lets the GUI thread run what was posted to it, for ms.
+void pumpFor(const int ms) {
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < ms) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
 }
 
 HttpReply send(const quint16 port, const QByteArray& request, const int timeoutMs = 10000) {
@@ -359,6 +370,131 @@ TEST_CASE("Remote API server times out a silent client", "[remote-api][server]")
 
     // a silent client does not block the next one for longer than the timeout
     CHECK(send(port, get("/api/v1/ping", port, fixture.token)).status == 200);
+}
+
+TEST_CASE("Remote API server: idle and slow clients hold up nobody else", "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start(); // the application's limits: 5 s for the headers, 15 s in all
+
+    // four connections that send nothing, and one that stops halfway
+    std::vector<std::unique_ptr<QTcpSocket>> idle;
+    for (int i = 0; i < 5; ++i) {
+        auto socket = std::make_unique<QTcpSocket>();
+        socket->connectToHost(QHostAddress::LocalHost, port);
+        REQUIRE(socket->waitForConnected(5000));
+        idle.push_back(std::move(socket));
+    }
+    idle.back()->write("GET /api/v1/ping HTTP/1.1\r\nHost: 127.0.0.1");
+    idle.back()->waitForBytesWritten(1000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    QElapsedTimer timer;
+    timer.start();
+    HttpReply reply = send(port, get("/api/v1/ping", port, fixture.token));
+    CHECK(reply.status == 200);
+    CHECK(timer.elapsed() < 2000); // not 5 x 15 s
+    reply = send(port, get("/api/v1/gui", port, fixture.token));
+    CHECK(reply.status == 200);
+    CHECK(timer.elapsed() < 4000);
+}
+
+TEST_CASE("Remote API server: the headers must come quickly", "[remote-api][server]") {
+    Fixture fixture;
+    LC_RemoteApiServer::Limits limits;
+    limits.headerTimeoutMs = 300;
+    limits.readTimeoutMs = 20000;
+    const quint16 port = fixture.start(limits);
+
+    QElapsedTimer timer;
+    timer.start();
+    HttpReply reply = send(port, {}); // connects and sends nothing
+    CHECK(reply.status == 408);
+    CHECK(reply.error() == "request_timeout");
+    CHECK(timer.elapsed() < 5000);
+    // a body may take the full read timeout once the headers are in
+    reply = send(port, "POST /api/v1/echo HTTP/1.1\r\nHost: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " +
+                           fixture.token + "\r\nContent-Length: 2\r\n\r\n{}");
+    CHECK(reply.status == 201);
+}
+
+TEST_CASE("Remote API server: connections over the limit are answered 503 at once", "[remote-api][server]") {
+    Fixture fixture;
+    LC_RemoteApiServer::Limits limits;
+    limits.maxConnections = 2;
+    const quint16 port = fixture.start(limits);
+
+    std::vector<std::unique_ptr<QTcpSocket>> idle;
+    for (int i = 0; i < 2; ++i) {
+        auto socket = std::make_unique<QTcpSocket>();
+        socket->connectToHost(QHostAddress::LocalHost, port);
+        REQUIRE(socket->waitForConnected(5000));
+        idle.push_back(std::move(socket));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(400)); // both are being read
+    QElapsedTimer timer;
+    timer.start();
+    HttpReply reply = send(port, get("/api/v1/ping", port, fixture.token), 3000);
+    CHECK(reply.status == 503);
+    CHECK(reply.error() == "server_busy");
+    CHECK(timer.elapsed() < 2500);
+
+    idle.clear(); // the readers see the connections close and end
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    CHECK(send(port, get("/api/v1/ping", port, fixture.token)).status == 200);
+}
+
+TEST_CASE("Remote API server: a request whose client gave up never runs", "[remote-api][server]") {
+    Fixture fixture;
+    std::atomic<int> runs{0};
+    LC_RouteOptions changes;
+    changes.capability = "test";
+    changes.changesDocument = true;
+    fixture.router.add("POST", "/api/v1/count", changes, [&runs](LC_ApiCall&) {
+        ++runs;
+        return LC_ApiResponse::ok({{"runs", runs.load()}}, 201);
+    });
+    const quint16 port = fixture.start();
+    const QByteArray request = "POST /api/v1/count HTTP/1.1\r\nHost: 127.0.0.1:" + QByteArray::number(port) +
+                               "\r\nX-Api-Token: " + fixture.token + "\r\nContent-Length: 0\r\n\r\n";
+
+    // Nothing pumps the GUI thread (LibreCAD is busy): the client gives up after
+    // 300 ms and closes the connection.
+    const HttpReply abandoned = exchange(port, request, 300);
+    CHECK(abandoned.status == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // the reader sees the close
+    pumpFor(300);   // LibreCAD is free again
+    CHECK(runs.load() == 0);
+
+    // the next client is served normally
+    const HttpReply served = send(port, request);
+    CHECK(served.status == 201);
+    CHECK(runs.load() == 1);
+}
+
+TEST_CASE("Remote API server: the client's deadline caps the wait for LibreCAD", "[remote-api][server]") {
+    Fixture fixture;
+    std::atomic<int> runs{0};
+    LC_RouteOptions slow;
+    slow.capability = "test";
+    slow.timeoutMs = 120000; // as open, save and export
+    fixture.router.add("POST", "/api/v1/slow", slow, [&runs](LC_ApiCall&) {
+        ++runs;
+        return LC_ApiResponse::ok({});
+    });
+    const quint16 port = fixture.start();
+    QElapsedTimer timer;
+    timer.start();
+    // nothing pumps the GUI thread
+    const HttpReply reply = exchange(port, "POST /api/v1/slow HTTP/1.1\r\nHost: 127.0.0.1:" + QByteArray::number(port) +
+                                               "\r\nX-Api-Token: " + fixture.token +
+                                               "\r\nX-Request-Timeout-Ms: 400\r\nContent-Length: 0\r\n\r\n",
+                                     10000);
+    CHECK(reply.status == 504);
+    CHECK(reply.error() == "ui_timeout");
+    CHECK_FALSE(reply.json.value("started").toBool(true));
+    CHECK(timer.elapsed() < 5000);
+    pumpFor(200);
+    CHECK(runs.load() == 0);
 }
 
 TEST_CASE("Remote API server: a second server cannot take the port", "[remote-api][server]") {

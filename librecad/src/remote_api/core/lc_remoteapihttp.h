@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -63,6 +62,8 @@ public:
     State state() const { return m_state; }
     // True when nothing at all was received (a connection opened and closed).
     bool isEmpty() const { return m_buffer.isEmpty() && !m_headersDone; }
+    // True once the request line and every header are in (the body may still be coming).
+    bool headersComplete() const { return m_headersDone; }
 
     const LC_ApiError& error() const { return m_error; }
     const LC_ApiRequest& request() const { return m_request; }

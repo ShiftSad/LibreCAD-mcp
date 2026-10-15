@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -21,6 +20,8 @@
  ******************************************************************************/
 
 #include "lc_remoteapicontext.h"
+
+#include <QFileInfo>
 
 #include "qc_applicationwindow.h"
 #include "qc_mdiwindow.h"
@@ -86,6 +87,11 @@ QC_MDIWindow* LC_RemoteApiContext::activeDocumentWindow() const {
 }
 
 LC_ResolvedDoc LC_RemoteApiContext::resolve(const LC_ApiRequest& request) const {
+    if (request.query.count(QStringLiteral("doc")) > 1) {
+        // one of them would win at random: never act on a drawing the client did not mean
+        throw LC_ApiError(400, QStringLiteral("bad_param"), QStringLiteral("'doc' is given more than once"),
+                          {{QStringLiteral("param"), QStringLiteral("doc")}});
+    }
     const QString docParam = request.query.value(QStringLiteral("doc")).trimmed();
     if (docParam.isEmpty()) {
         QC_MDIWindow* window = activeDocumentWindow();
@@ -159,6 +165,20 @@ QString LC_RemoteApiContext::cancelActiveAction(const LC_ResolvedDoc& doc) const
     }
     doc.view->killAllActions();
     return name;
+}
+
+QString LC_RemoteApiContext::documentName(const QC_MDIWindow* window) {
+    const QString path = window->getFileName();
+    if (!path.isEmpty()) {
+        return QFileInfo(path).fileName();
+    }
+    // "unnamed document 3[*]", maybe followed by " [Draft Mode]"
+    QString title = window->windowTitle();
+    const qsizetype marker = title.indexOf(QLatin1String("[*]"));
+    if (marker >= 0) {
+        title.truncate(marker);
+    }
+    return title.trimmed();
 }
 
 void LC_RemoteApiContext::notify(const QString& line, const bool force) const {

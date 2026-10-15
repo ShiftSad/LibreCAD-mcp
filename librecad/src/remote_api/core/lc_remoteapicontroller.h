@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -71,6 +70,12 @@ public:
 
     static QString appVersion();    // LC_VERSION, e.g. "2.2.2.6-alpha"
     static int mcpBuild();          // LC_MCP_RELEASE
+    // The release tag of this build ("v2.2.2.6-mcp.1", LC_MCP_TAG, fixed at
+    // configure time; derived from LC_VERSION only when that is missing).
+    static QString releaseTag();
+    // The mcp/ folder of the checkout this build came from (LC_MCP_SOURCE_DIR)
+    // while it still holds the server, else empty: release builds run elsewhere.
+    static QString mcpSourceDir();
 
 private:
     void registerMetaRoutes();

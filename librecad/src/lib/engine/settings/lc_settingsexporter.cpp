@@ -98,6 +98,7 @@ bool LC_SettingsExporter::exportSettings(QWidget* parent) {
     QJsonObject objGroups;
     QSettings* settings = RS_SETTINGS->getSettings();
     for (const QString& group : settings->childGroups()) {
+        if (group == QLatin1String("RemoteAPI")) { continue; } // librecad-mcp: never export the Remote API token or switch
         exportGroup(settings, group, objGroups);
     }
 
@@ -151,6 +152,7 @@ bool LC_SettingsExporter::importSettings(QWidget* parent) {
         return false;
     }
     for (const QString& groupName : groups.keys()) {
+        if (groupName == QLatin1String("RemoteAPI")) { continue; } // librecad-mcp: an imported file never enables the Remote API
         const QJsonObject& groupObj = groups.value(groupName).toObject();
         if (groupObj.empty()) {
             continue;

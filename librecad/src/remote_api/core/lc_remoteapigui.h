@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -28,7 +27,9 @@
 
 #include <functional>
 
+#include <QDeadlineTimer>
 #include <QString>
+#include <QtGlobal>
 
 #include "lc_remoteapitypes.h"
 
@@ -56,6 +57,51 @@ namespace LC_RemoteApiGui {
     // had already been answered with ui_timeout or shutting_down (the controller
     // writes "[MCP] <route> finished after the client gave up"). Empty clears.
     void setLateTaskNotifier(std::function<void(const QString& route)> notifier);
+
+    // The current abort generation: abortWaiting() increments it.
+    quint64 abortGeneration();
+
+    /**
+     * Server side: the client of the request being handled on this thread. While
+     * a scope is alive, run() on this thread
+     * - answers 503 shutting_down, without posting, once abortWaiting() was called
+     *   after the generation given here (so a stop that lands between reading a
+     *   request and posting its task is not missed);
+     * - gives up waiting at the client's deadline when it comes before the
+     *   route's timeout (504 ui_timeout, with "started");
+     * - gives up once clientGone() turns true: a task that has not started never
+     *   runs (499 client_gone, which nobody receives).
+     */
+    class ClientScope {
+    public:
+        ClientScope(quint64 abortGeneration, std::function<bool()> clientGone, QDeadlineTimer deadline);
+        ~ClientScope();
+        ClientScope(const ClientScope&) = delete;
+        ClientScope& operator=(const ClientScope&) = delete;
+
+        quint64 abortGeneration;
+        std::function<bool()> clientGone;
+        QDeadlineTimer deadline;
+
+    private:
+        ClientScope* m_previous = nullptr;
+    };
+
+    /**
+     * GUI thread. Marks code of the user's own that pumps events in a nested
+     * loop (processEvents in openFile, newDrawingFromTemplate, ...): an API task
+     * posted meanwhile waits until the scope ends instead of running in the
+     * middle of it. Nested scopes count. A one-line hook in upstream code.
+     */
+    class UserBusyScope {
+    public:
+        UserBusyScope();
+        ~UserBusyScope();
+        UserBusyScope(const UserBusyScope&) = delete;
+        UserBusyScope& operator=(const UserBusyScope&) = delete;
+    };
+    // GUI thread; >0 while a UserBusyScope is alive.
+    int userBusy();
 }
 
 #endif

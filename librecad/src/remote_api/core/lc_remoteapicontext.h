@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -60,11 +59,14 @@ public:
     QList<QC_MDIWindow*> documentWindows() const;           // top-level, non-preview
     QC_MDIWindow* activeDocumentWindow() const;             // preview -> parent
     // ?doc= or the active document. Throws LC_ApiError: 409 no_document,
-    // 404 unknown_document, 400 bad_param (doc is not an id).
+    // 404 unknown_document, 400 bad_param (doc is not an id, or given twice).
     LC_ResolvedDoc resolve(const LC_ApiRequest&) const;     // ?doc= or active; throws
     LC_ResolvedDoc resolve(QC_MDIWindow*) const;
     QString cancelActiveAction(const LC_ResolvedDoc&) const; // getCurrentActionName + killAllActions; "" if idle
     void notify(const QString& line, bool force = false) const; // command-history line when Notify is on, or always with force
+    // Doc.name: the file name, or the window title of an unnamed drawing
+    // without the "[*]" marker and what follows it (" [Draft Mode]").
+    static QString documentName(const QC_MDIWindow* window);
 
 private:
     QC_ApplicationWindow* m_appWindow = nullptr;

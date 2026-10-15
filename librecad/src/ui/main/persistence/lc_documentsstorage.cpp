@@ -30,6 +30,7 @@
 #endif
 
 #include "lc_filedialogservice.h"
+#include "lc_remoteapigui.h" // librecad-mcp: Remote API gate around processEvents
 #include "qg_filedialog.h"
 #include "rs_debug.h"
 #include "rs_dialogfactory.h"
@@ -190,8 +191,9 @@ bool LC_DocumentsStorage::loadDocument(const RS_Document* document, const QStrin
                                       std::function<bool(bool, const QString&)> onImportError) const {
     bool result = false;
     if (document != nullptr && !fileName.isEmpty()) {
+        const LC_RemoteApiGui::UserBusyScope remoteApiBusy; // librecad-mcp: no API task inside processEvents below
         // cosmetics..
-        qApp->processEvents(QEventLoop::AllEvents, 1000);
+        qApp->processEvents(LC_RemoteApiGui::depth() > 0 ? QEventLoop::ExcludeUserInputEvents : QEventLoop::AllEvents, 1000); // librecad-mcp: no user input inside an API task
         // librecad-mcp: onImportError
         result = loadGraphic(document->getGraphic(), fileName, type, encoding, std::move(onImportError));
     } else {

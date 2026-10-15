@@ -2542,6 +2542,11 @@ option (LIBRECAD_REGISTER_CROSS_READ_SMOKE
         "Register the cross-reader DWG fixture smoke test with CTest" OFF)
 option (LIBRECAD_REGISTER_TEXT_FOUNDATION_TESTS
         "Register headless text/source-state foundation tests with CTest" OFF)
+# librecad-mcp: register librecad_remote_api_tests with CTest. The target is not
+# built by default (EXCLUDE_FROM_ALL), so a plain ctest after a default build
+# must not list it; the remote-api CI job turns this on.
+option (LIBRECAD_REGISTER_REMOTE_API_TESTS
+        "Register librecad_remote_api_tests with CTest (build that target first)" OFF)
 
 if (BUILD_TESTS)
     enable_testing()
@@ -3192,7 +3197,7 @@ if (BUILD_TESTS)
         LIBRECAD_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/librecad/src/lib/filters/tests/testdata"
         ${LC_REMOTE_API_DEFINES}
     )
-    if (LC_REMOTE_API_TEST_SOURCES)
+    if (LC_REMOTE_API_TEST_SOURCES AND LIBRECAD_REGISTER_REMOTE_API_TESTS) # librecad-mcp: opt-in, the target is EXCLUDE_FROM_ALL
         add_test(NAME librecad_remote_api_tests
             COMMAND $<TARGET_FILE:librecad_remote_api_tests> --reporter compact)
         set_tests_properties(librecad_remote_api_tests PROPERTIES
