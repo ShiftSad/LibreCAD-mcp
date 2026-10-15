@@ -21,6 +21,8 @@ GENERATED_DIR = ../../generated/librecad
 include(../../common.pri)
 include(./boost.pri)
 include(./muparser.pri)
+# librecad-mcp: in-app Remote API (see remote_api/remote_api.pri)
+include($$PWD/remote_api/remote_api.pri)
 
 CONFIG += qt \
     warn_on \

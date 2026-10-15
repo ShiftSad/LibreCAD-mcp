@@ -84,6 +84,7 @@
 #include "lc_quickinfowidget.h"
 #include "lc_releasechecker.h"
 #include "lc_relzerocoordinateswidget.h"
+#include "lc_remoteapicontroller.h" // librecad-mcp: complete type for m_remoteApi
 #include "lc_snapmanager.h"
 #include "lc_snapoptionswidgetsholder.h"
 #include "lc_ucslistwidget.h"

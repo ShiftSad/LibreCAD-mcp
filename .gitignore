@@ -108,6 +108,10 @@ core
 *.core
 vgcore.*
 core.*
+# librecad-mcp: the Remote API's "core" component is source code, not a core dump
+!/librecad/src/remote_api/core/
+!/librecad/src/remote_api/core/core.cmake
+!/librecad/src/remote_api/core/core.pri
 
 .qmake.stash
 
