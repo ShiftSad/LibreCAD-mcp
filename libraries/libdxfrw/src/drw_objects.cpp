@@ -1609,6 +1609,16 @@ bool decodeDxfTimeBll(double value, std::uint32_t& days,
     return true;
 }
 
+// Table and cell style colors (TABLESTYLE row text, fill and border colors,
+// the content format color, cell style background and border colors) are the
+// true-color CMC form in every version (LibreDWG FIELD_CMTC), so files before
+// AC1018 read them with the AC1018 layout. This is a type-specific exception:
+// ordinary CMC fields before AC1018 remain index-only and keep the file
+// version.
+DRW::Version tableStyleColorVersion(DRW::Version version) {
+    return version < DRW::AC1018 ? DRW::AC1018 : version;
+}
+
 bool readTableStyleContentFormat(DRW::Version version, dwgBuffer *buf,
                                  dwgBuffer *strBuf, dwgBuffer *hdlBuf,
                                  std::uint32_t bodySize,
@@ -1637,11 +1647,7 @@ bool readTableStyleContentFormat(DRW::Version version, dwgBuffer *buf,
         return readBitDoubleWithinBody(buf, version, bodySize, value)
             && std::isfinite(value);
     };
-    // TABLESTYLE row colors are the true-color CMC form even in AC1015.
-    // This is a type-specific exception; ordinary AC1015 CMC fields remain
-    // index-only and must continue using the file version.
-    const DRW::Version colorVersion =
-        version < DRW::AC1018 ? DRW::AC1018 : version;
+    const DRW::Version colorVersion = tableStyleColorVersion(version);
     const auto readColor = [buf, textBuf, colorVersion, bodySize,
                             stringSize](int& value) {
         std::uint32_t parsed = 0;
@@ -1715,9 +1721,11 @@ bool readTableStyleCellStyle(DRW::Version version, dwgBuffer *buf,
         return readBitDoubleWithinBody(buf, version, bodySize, value)
             && std::isfinite(value);
     };
-    const auto readColor = [buf, strBuf, version, bodySize, stringSize](int& value) {
+    const DRW::Version colorVersion = tableStyleColorVersion(version);
+    const auto readColor = [buf, strBuf, colorVersion, bodySize,
+                            stringSize](int& value) {
         std::uint32_t parsed = 0;
-        if (!readCmColorWithinBounds(buf, strBuf ? strBuf : buf, version,
+        if (!readCmColorWithinBounds(buf, strBuf ? strBuf : buf, colorVersion,
                                      bodySize, stringSize, parsed))
             return false;
         value = static_cast<int>(parsed);
@@ -1836,10 +1844,7 @@ bool readLegacyTableStyleRowStyle(DRW::Version version, dwgBuffer *buf,
         return readBitDoubleWithinBody(buf, version, bodySize, value)
             && std::isfinite(value);
     };
-    // TABLESTYLE row colors use the full CMC form even in AC1015. This is a
-    // type-specific exception; ordinary AC1015 CMC fields remain index-only.
-    const DRW::Version colorVersion =
-        version < DRW::AC1018 ? DRW::AC1018 : version;
+    const DRW::Version colorVersion = tableStyleColorVersion(version);
     const auto readColor = [buf, textBuf, colorVersion, bodySize,
                             stringSize](int& value) {
         std::uint32_t parsed = 0;
@@ -7956,9 +7961,9 @@ bool DRW_AppId::encodeDwg(DRW::Version version, dwgBufferW *buf,
 bool DRW_Dictionary::parseCode(int code, const std::unique_ptr<dxfReader>& reader){
     switch (code) {
     case 280: {
+        // The hard-owner flag precedes the entry pairs, including dropped ones.
         const int parsedHardOwner = reader->getInt32();
-        if (!m_entries.empty() || !m_pendingEntryName.empty()
-            || !validDictionaryHardOwner(parsedHardOwner))
+        if (m_dxfEntrySeen || !validDictionaryHardOwner(parsedHardOwner))
             return false;
         hardOwner = parsedHardOwner;
         break;
@@ -7967,26 +7972,32 @@ bool DRW_Dictionary::parseCode(int code, const std::unique_ptr<dxfReader>& reade
         cloning = reader->getInt32();
         break;
     case 3: {
-        if (!m_pendingEntryName.empty()
+        if (m_hasPendingEntry
             || m_entries.size() >= DRW_Dictionary::kMaxEntries)
             return false;
+        // The name may be empty: an empty-named slot with a null target is
+        // dropped below, as in DWG; with a live target it is rejected there.
         m_pendingEntryName = reader->getUtf8String();
-        if (m_pendingEntryName.empty())
-            return false;
+        m_hasPendingEntry = true;
+        m_dxfEntrySeen = true;
         break;
     }
     case 350:   //soft-owned entry handle
     case 360: { //hard-owned entry handle
         // The hard-owner flag says how entries are owned; files mix 350 and
         // 360 regardless (ezdxf writes 350 under 280 = 1).
-        if (m_pendingEntryName.empty())
+        if (!m_hasPendingEntry || !reader->isValidHandleString())
             return false;
         const std::uint32_t entryHandle =
             static_cast<std::uint32_t>(reader->getHandleString());
-        if (entryHandle == 0)
-            return false;
-        m_entries.push_back({m_pendingEntryName, entryHandle});
+        // A null target names no member; drop the pair as the DWG parser does.
+        if (entryHandle != 0) {
+            if (m_pendingEntryName.empty())
+                return false;
+            m_entries.push_back({m_pendingEntryName, entryHandle});
+        }
         m_pendingEntryName.clear();
+        m_hasPendingEntry = false;
         break;
     }
     default:
@@ -7996,7 +8007,7 @@ bool DRW_Dictionary::parseCode(int code, const std::unique_ptr<dxfReader>& reade
 }
 
 bool DRW_Dictionary::hasCompleteDxfEntries() const noexcept {
-    if (!m_pendingEntryName.empty() || !validDictionaryHardOwner(hardOwner)
+    if (m_hasPendingEntry || !validDictionaryHardOwner(hardOwner)
         || m_entries.size() > DRW_Dictionary::kMaxEntries)
         return false;
     for (const Entry& entry : m_entries) {
@@ -8138,6 +8149,22 @@ bool DRW_Dictionary::parseDwgImpl(DRW::Version version, dwgBuffer *buf,
         dwgHandle itemH;
         if (!readDwgObjectHandleWithinFrame(version, *buf, true, itemH))
             return false;
+        // AutoCAD writes pairs whose item handle is null: a named key with no
+        // object (ACAD_PARALLEL_BACKGROUND in the named-object dictionary's
+        // ACAD_BACKGROUND dictionary) and empty-named slots (for example in
+        // the named-object dictionary, its variable dictionary and the
+        // FBXASSET/ACAD_XREC_ROUNDTRIP extension dictionaries, in files of
+        // every version from R13 on). Such a pair is consumed with the counted
+        // stream but names no member, so it is not published; every
+        // published entry keeps a name and a non-null item. Only a null that
+        // carries an ownership code is dropped: any other null, such as the
+        // zero bits of a misaligned handle stream, still fails. A wide handle
+        // whose low 32 bits are zero is not null and stays a parse failure,
+        // as the entry model cannot represent it.
+        if (itemH.ref64 == 0
+            && (itemH.code == DRW::DwgSoftOwnership
+                || itemH.code == DRW::DwgHardOwnership))
+            continue;
         if (names[i].empty() || itemH.ref == 0)
             return false;
         entries.push_back({names[i], itemH.ref});
@@ -13514,8 +13541,9 @@ bool DRW_CellStyleMap::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint3
     if (!resolveR2007StreamBounds(version, bodyStringBuff, objSize, bodyEnd, stringEnd))
         return fail();
 
-    // The body cursor reaches the inline handle stream for R2000/R2004;
-    // R2007+ uses the separate absolute objSize boundary.
+    // Handles start at the absolute objSize boundary: R2007+ reads them
+    // alongside the body, R13..R2004 (AC1012..AC1018) once the body has been
+    // read.
     dwgBuffer hBuff = *buf;
     dwgBuffer *hBuf = (version > DRW::AC1018) ? &hBuff : buf;
     std::uint64_t handleEndBit = 0;
@@ -13575,10 +13603,17 @@ bool DRW_CellStyleMap::parseDwg(DRW::Version version, dwgBuffer *buf, std::uint3
     }
 
     if (version <= DRW::AC1018) {
-        if (!this->readDwgObjectCommonHandles(version, bodyBuf, &parsedParentHandle, &parsedReactors, &parsedXDictHandle))
+        // Read the handles from their own cursor at the objSize boundary
+        // (inline after the body for a zero-sized carrier) so the body
+        // cursor still marks the end of the data for the check below.
+        dwgBuffer legacyHandles = bodyBuf->forkIndependent();
+        seekObjectHandleStream(version, &legacyHandles, objSize);
+        if (!legacyHandles.isGood()
+            || !this->readDwgObjectCommonHandles(version, &legacyHandles, &parsedParentHandle, &parsedReactors, &parsedXDictHandle))
             return fail();
         for (DRW_TableStyleCellStyle& style : cellStyles) {
-            if (!readTableStyleCellStyleHandles(bodyBuf, style, handleEndBit))
+            if (!readTableStyleCellStyleHandles(&legacyHandles, style,
+                                                handleEndBit))
                 return fail();
         }
     }

@@ -639,10 +639,11 @@ protected:
                                    DwgIntegrityAddressSpace offsetSpace =
                                        DwgIntegrityAddressSpace::DecodedBuffer);
   bool checkSentinel(dwgBuffer *buf, enum secEnum::DWGSection, bool start);
-  //! Advance over the version-dependent bytes between the CLASSES CRC and
-  //! its closing sentinel.  Real-world R18/R2007 files use both the legacy
-  //! two-byte/no-tail layout and the newer eight-byte layout emitted by our
-  //! writer.
+  //! Advance over any bytes between the CLASSES CRC and its closing
+  //! sentinel.  AutoCAD and ODA files put the END sentinel directly after the
+  //! CRC (the zero-byte form); the eight- and two-byte probes are kept for
+  //! older or odd writers, and the two-byte probe used to mask the R2007+
+  //! readers' misplaced CRC offset.
   [[nodiscard]] bool readDwgClassesTail(dwgBuffer &buffer);
   [[nodiscard]] bool
   publishDwgClasses(std::vector<DwgStagedClass> &stagedClasses);

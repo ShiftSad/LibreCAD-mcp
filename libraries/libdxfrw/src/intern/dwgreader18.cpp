@@ -1402,7 +1402,17 @@ bool dwgReader18::readDwgClasses(){
             recordFailure(DwgIntegrityCheckKind::PageGeometry, si.Id);
             return false;
         }
-        crcPosition = stringBufferSize;
+        // The string stream footer (its size word and the end bit at
+        // footerEndBit) closes the class data area, so the RS CRC starts at
+        // the next byte boundary and the END sentinel follows it. The string
+        // data itself ends before that footer and cannot locate the CRC.
+        crcPosition = footerEndBit / 8 + 1;
+        if (!dwgSafety::range(crcPosition, 2, dataBuf.size())
+            || crcPosition > static_cast<std::uint64_t>(
+                   std::numeric_limits<std::int32_t>::max() - 1)) {
+            recordFailure(DwgIntegrityCheckKind::PageRange, si.Id);
+            return false;
+        }
         strBuff = dwgBuffer(objData.get(), stringBufferSize, &decoder);
         strBuf = &strBuff;
         DRW_DBG("\nclass string start bit: ");
@@ -1562,11 +1572,10 @@ bool dwgReader18::readDwgClasses(){
         return false;
     }
     DRW_DBG("\nclasses section end sentinel= ");
-    // 1.4: the END sentinel is checked but kept WARN-ONLY here. libdxfrw's
-    // decompressed-buffer model for AC1024 (reader24→reader21) and AC1027
-    // (reader27→this) does not land a reliable CLASSES end sentinel at this
-    // position on valid files, so a hard fail here regresses the corpus.
-    // Only reader15 (AC1015), whose end sentinel is reliable, hard-fails.
+    // 1.4: the END sentinel is checked but kept WARN-ONLY here. AutoCAD
+    // writes it directly after the CRC, but older libdxfrw-written files can
+    // leave stray bytes in between, so a hard fail would reject drawings
+    // whose classes parsed cleanly. Only reader15 (AC1015) hard-fails.
     checkSentinel(&dataBuf, secEnum::CLASSES, false);
 
     //Cleanup: global store for uncompressed data of all pages

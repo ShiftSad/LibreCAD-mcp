@@ -1584,7 +1584,17 @@ bool dwgReader21::readDwgClasses(){
         recordFailure(DwgIntegrityCheckKind::PageGeometry, si.Id);
         return false;
     }
-    crcPosition = stringBufferSize;
+    // The string stream footer (its size word and the end bit at
+    // footerEndBit) closes the class data area, so the RS CRC starts at the
+    // next byte boundary and the END sentinel follows it. The string data
+    // itself ends before that footer and cannot locate the CRC.
+    crcPosition = footerEndBit / 8 + 1;
+    if (!dwgSafety::range(crcPosition, 2, buff.size())
+        || crcPosition > static_cast<std::uint64_t>(
+               std::numeric_limits<std::int32_t>::max() - 1)) {
+        recordFailure(DwgIntegrityCheckKind::PageRange, si.Id);
+        return false;
+    }
     strBuff = dwgBuffer(tmpClassesData.data(), stringBufferSize, &decoder);
     DRW_DBG("\nclass string start bit: ");
     DRW_DBG(static_cast<unsigned long long>(stringStartBit));
@@ -1735,10 +1745,9 @@ bool dwgReader21::readDwgClasses(){
     DRW_DBG("\nclasses section end sentinel= ");
     // 1.4: this is the END sentinel — it was wrongly passed start=true, so it
     // compared the END bytes against the BEGIN sentinel (a latent bug). Fix
-    // the arg to false. Kept WARN-ONLY: AC1024 (reader24→here) valid corpus
-    // files do not carry a matching CLASSES end sentinel in libdxfrw's
-    // single-buffer model, so a hard fail regresses the corpus. The arg fix
-    // makes the diagnostic correct without changing the read outcome.
+    // the arg to false. Kept WARN-ONLY: AutoCAD writes it directly after the
+    // CRC, but older libdxfrw-written files can leave stray bytes in between,
+    // so a hard fail would reject drawings whose classes parsed cleanly.
     checkSentinel(&buff, secEnum::CLASSES, false);
     if (!buff.isGood()) {
         recordFailure(DwgIntegrityCheckKind::PageRange, si.Id);

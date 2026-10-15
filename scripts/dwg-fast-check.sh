@@ -67,6 +67,7 @@ fast_test_target_for_stem() {
   dwg_handseed_tests|dynblock_tests|evalgraph_tests|\
   acsh_tests|acsh_shapes_tests|\
   dwg_object_encode_round_trip_tests|dwg_object_frame_tests|dwg_safety_tests|\
+  dwg_classes_crc_tests|\
   dxf_attribute_tests|dxf_object_tests|field_dxf_tests|\
   mleader_dxf_context_tests|mesh_tests)
     printf 'libdxfrw_%s\n' "$1"
@@ -307,8 +308,8 @@ if ((CHANGED)); then
       dwg_handseed_tests|dynblock_tests|evalgraph_tests|\
       acsh_tests|acsh_shapes_tests|\
       dwg_object_encode_round_trip_tests|\
-      dwg_object_frame_tests|dwg_safety_tests|dxf_attribute_tests|\
-      dxf_object_tests|field_dxf_tests)
+      dwg_object_frame_tests|dwg_safety_tests|dwg_classes_crc_tests|\
+      dxf_attribute_tests|dxf_object_tests|field_dxf_tests)
         ;;
       *)
         changed_test_linked=1
@@ -478,7 +479,8 @@ libdxfrw_dwg_entity_encode_round_trip_tests|libdxfrw_dwg_header_encode_round_tri
 libdxfrw_dwg_handseed_tests|libdxfrw_dynblock_tests|libdxfrw_evalgraph_tests|\
 libdxfrw_acsh_tests|libdxfrw_acsh_shapes_tests|\
 libdxfrw_dwg_object_encode_round_trip_tests|libdxfrw_dwg_object_frame_tests|\
-libdxfrw_dwg_safety_tests|libdxfrw_dxf_attribute_tests|libdxfrw_dxf_object_tests|\
+libdxfrw_dwg_safety_tests|libdxfrw_dwg_classes_crc_tests|\
+libdxfrw_dxf_attribute_tests|libdxfrw_dxf_object_tests|\
 libdxfrw_field_dxf_tests|libdxfrw_mleader_dxf_context_tests) ;;
 *) ((TEST_FILE_TARGET)) || die "unsupported CMake target '$BUILD_TARGET'" ;;
 esac
@@ -516,6 +518,7 @@ if [[ -n "$TEST_SPEC" && -n "$BUILD_TARGET" &&
       "$BUILD_TARGET" != "libdxfrw_dwg_object_encode_round_trip_tests" &&
       "$BUILD_TARGET" != "libdxfrw_dwg_object_frame_tests" &&
       "$BUILD_TARGET" != "libdxfrw_dwg_safety_tests" &&
+      "$BUILD_TARGET" != "libdxfrw_dwg_classes_crc_tests" &&
       "$BUILD_TARGET" != "libdxfrw_dxf_attribute_tests" &&
       "$BUILD_TARGET" != "libdxfrw_dxf_object_tests" &&
       "$BUILD_TARGET" != "libdxfrw_field_dxf_tests" &&
@@ -542,6 +545,7 @@ if ((FAST)) && [[ -n "$BUILD_TARGET" &&
       "$BUILD_TARGET" != "libdxfrw_dwg_object_encode_round_trip_tests" &&
       "$BUILD_TARGET" != "libdxfrw_dwg_object_frame_tests" &&
       "$BUILD_TARGET" != "libdxfrw_dwg_safety_tests" &&
+      "$BUILD_TARGET" != "libdxfrw_dwg_classes_crc_tests" &&
       "$BUILD_TARGET" != "libdxfrw_dxf_attribute_tests" &&
       "$BUILD_TARGET" != "libdxfrw_dxf_object_tests" &&
       "$BUILD_TARGET" != "libdxfrw_field_dxf_tests" &&
@@ -594,6 +598,7 @@ if ((NO_BUILD)) && [[ -n "$BUILD_TARGET" ]]; then
   libdxfrw_acsh_tests|libdxfrw_acsh_shapes_tests|\
   libdxfrw_dwg_object_encode_round_trip_tests|\
   libdxfrw_dwg_object_frame_tests|libdxfrw_dwg_safety_tests|\
+  libdxfrw_dwg_classes_crc_tests|\
   libdxfrw_dxf_attribute_tests|libdxfrw_dxf_object_tests|\
   libdxfrw_field_dxf_tests|libdxfrw_mleader_dxf_context_tests) ;;
   *) ((TEST_FILE_TARGET)) ||

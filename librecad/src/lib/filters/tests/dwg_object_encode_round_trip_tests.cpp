@@ -8191,6 +8191,156 @@ TEST_CASE("DRW_Dictionary rejects a body that crosses its AC1027 boundary",
     CHECK(rejected.m_entries.empty());
 }
 
+// AutoCAD writes dictionary pairs whose item handle is null (in files of every
+// version from R13 on; this test uses AC1032): ACAD_PARALLEL_BACKGROUND in the
+// named-object dictionary's ACAD_BACKGROUND dictionary (owner 0xC), and
+// empty-named slots such as those seen in the named-object dictionary and the FBXASSET/ACAD_XREC_ROUNDTRIP extension
+// dictionaries. The encoder cannot produce them, so the frame is assembled by
+// hand in the R2013+ layout.
+TEST_CASE("DRW_Dictionary drops AC1032 entries with a null item handle",
+          "[dwg-read][object-encode][dictionary][r2018]") {
+    const DRW::Version version = DRW::AC1032;
+    struct Item {
+        std::string name;
+        std::uint64_t handle;
+        std::uint8_t code = DRW::DwgSoftOwnership;
+    };
+    const auto emit = [version](int hardOwner, const std::vector<Item>& items,
+                                std::uint32_t& handleBits) {
+        dwgBufferW data;
+        dwgBufferW strings;
+        dwgBufferW handles;
+        emitObjectPreamble(data, version, /*oType=*/42, /*handle=*/0x1C4A4,
+                           /*numReactors=*/0, /*xDictFlag=*/1);
+        data.putBit(0); // has_ds_data (R2013+ common object data)
+        data.putBitLong(static_cast<std::int32_t>(items.size()));
+        data.putBitShort(1); // cloning
+        data.putRawChar8(static_cast<std::uint8_t>(hardOwner));
+        for (const Item& item : items)
+            strings.putVariableText(version, item.name);
+        emitCommonHandlePrefix(handles, /*parentHandle=*/0xC, {},
+                               /*xDictFlag=*/1);
+        for (const Item& item : items) {
+            // AutoCAD keeps the soft-owner code on null items, even when the
+            // dictionary hard-owns its members.
+            dwgHandle itemHandle;
+            itemHandle.code = item.code;
+            itemHandle.ref = static_cast<std::uint32_t>(item.handle);
+            itemHandle.ref64 = item.handle;
+            handles.putHandle(itemHandle);
+        }
+
+        data.alignToByte();
+        strings.alignToByte();
+        const std::uint32_t stringBytes =
+            static_cast<std::uint32_t>(strings.data().size());
+        if (stringBytes != 0)
+            data.putBytes(strings.data().data(), stringBytes);
+        for (int i = 0; i < 7; ++i)
+            data.putBit(0);
+        const std::uint32_t stringBitSize = stringBytes * 8u + 7u;
+        data.putRawShort16(static_cast<std::uint16_t>(
+            stringBytes == 0 ? 0 : stringBitSize));
+        data.putBit(stringBytes == 0 ? 0 : 1);
+        data.alignToByte();
+        handles.alignToByte();
+        handleBits = static_cast<std::uint32_t>(handles.data().size() * 8u);
+
+        std::vector<std::uint8_t> bytes = data.data();
+        bytes.insert(bytes.end(), handles.data().begin(),
+                     handles.data().end());
+        return bytes;
+    };
+    const auto parse = [version](std::vector<std::uint8_t>& bytes,
+                                 std::uint32_t handleBits,
+                                 DRW_Dictionary& parsed) {
+        DRW_TextCodec decoder;
+        decoder.setVersion(version, false);
+        decoder.setCodePage("UTF-16", false);
+        dwgBuffer reader(bytes.data(), bytes.size(), &decoder);
+        return DrwObjectEncodeTestAccess::parse(parsed, version, &reader,
+                                                handleBits);
+    };
+
+    SECTION("a named key without an object") {
+        std::uint32_t handleBits = 0;
+        auto bytes = emit(/*hardOwner=*/0,
+                          {{"ACAD_PARALLEL_BACKGROUND", 0}}, handleBits);
+        DRW_Dictionary parsed;
+        REQUIRE(parse(bytes, handleBits, parsed));
+        CHECK(parsed.hasCompleteDwgEntries());
+        CHECK(parsed.handle == 0x1C4A4u);
+        CHECK(parsed.parentHandle == 0xCu);
+        CHECK(parsed.cloning == 1);
+        CHECK(parsed.hardOwner == 0);
+        CHECK(parsed.m_entries.empty());
+    }
+
+    SECTION("an empty-named null slot beside a live entry") {
+        std::uint32_t handleBits = 0;
+        auto bytes = emit(/*hardOwner=*/1,
+                          {{"", 0}, {"FBXASSET", 0x18A}, {"", 0}},
+                          handleBits);
+        DRW_Dictionary parsed;
+        REQUIRE(parse(bytes, handleBits, parsed));
+        CHECK(parsed.hasCompleteDwgEntries());
+        CHECK(parsed.hardOwner == 1);
+        REQUIRE(parsed.m_entries.size() == 1u);
+        CHECK(parsed.m_entries[0].m_name == "FBXASSET");
+        CHECK(parsed.m_entries[0].m_handle == 0x18Au);
+        CHECK(parsed.isDwgPayloadValid(version));
+    }
+
+    SECTION("a hard-owned null item is dropped too") {
+        std::uint32_t handleBits = 0;
+        auto bytes = emit(/*hardOwner=*/1,
+                          {{"", 0, DRW::DwgHardOwnership},
+                           {"KEPT", 0x2A, DRW::DwgHardOwnership}},
+                          handleBits);
+        DRW_Dictionary parsed;
+        REQUIRE(parse(bytes, handleBits, parsed));
+        CHECK(parsed.hasCompleteDwgEntries());
+        REQUIRE(parsed.m_entries.size() == 1u);
+        CHECK(parsed.m_entries[0].m_name == "KEPT");
+        CHECK(parsed.m_entries[0].m_handle == 0x2Au);
+    }
+
+    SECTION("a null item without an ownership code is still rejected") {
+        // Zero bits read from a misaligned handle stream decode as a null
+        // reference; only an owned null stands for an absent member.
+        for (const std::uint8_t code :
+             {static_cast<std::uint8_t>(DRW::DwgNullReference),
+              static_cast<std::uint8_t>(DRW::DwgSoftPointer),
+              static_cast<std::uint8_t>(DRW::DwgHardPointer)}) {
+            CAPTURE(static_cast<int>(code));
+            std::uint32_t handleBits = 0;
+            auto bytes = emit(/*hardOwner=*/0,
+                              {{"ACAD_PARALLEL_BACKGROUND", 0, code}},
+                              handleBits);
+            DRW_Dictionary rejected;
+            CHECK_FALSE(parse(bytes, handleBits, rejected));
+            CHECK(rejected.m_entries.empty());
+        }
+    }
+
+    SECTION("an empty name with a live item is still rejected") {
+        std::uint32_t handleBits = 0;
+        auto bytes = emit(/*hardOwner=*/1, {{"", 0x2A}}, handleBits);
+        DRW_Dictionary rejected;
+        CHECK_FALSE(parse(bytes, handleBits, rejected));
+        CHECK(rejected.m_entries.empty());
+    }
+
+    SECTION("a wide item whose low 32 bits are zero is not null") {
+        std::uint32_t handleBits = 0;
+        auto bytes = emit(/*hardOwner=*/0, {{"WIDE", 0x100000000ULL}},
+                          handleBits);
+        DRW_Dictionary rejected;
+        CHECK_FALSE(parse(bytes, handleBits, rejected));
+        CHECK(rejected.m_entries.empty());
+    }
+}
+
 TEST_CASE("DRW_Dictionary count diagnostics do not affect encoding",
           "[dwg-write][object-encode][dictionary][count-cap]") {
     DRW_Dictionary source;
@@ -11051,6 +11201,145 @@ TEST_CASE("DRW_CellStyleMap rejects a truncated common handle stream",
     CHECK_FALSE(DrwObjectEncodeTestAccess::parse(parsed, ver, &reader));
     CHECK_FALSE(reader.isGood());
     CHECK(parsed.m_cellStyles.empty());
+}
+
+TEST_CASE("DRW_CellStyleMap reads legacy cell styles with a real object size",
+          "[dwg-read][object-encode][cellstylemap]") {
+    // AutoCAD writes every cell style color in the true-color CMC form, even
+    // in R2000, and back-patches the object size to the handle stream start.
+    enum class ObjectSize { HandleStart, BeforeBodyEnd, PastBuffer,
+                            AfterHandles };
+    const auto encode = [](DRW::Version ver, int paddingBits,
+                           ObjectSize objectSize) {
+        dwgBufferW encoded;
+        emitObjectPreamble(encoded, ver, /*oType=*/603, /*handle=*/0xB13,
+                           /*numReactors=*/1, /*xDictFlag=*/0);
+        encoded.putBitLong(1);               // num_cells
+        encoded.putBitLong(5);               // cell style type
+        encoded.putBitShort(1);              // data flags
+        encoded.putBitLong(0);               // property override flags
+        encoded.putBitLong(0x8000);          // merge flags
+        encoded.putCmColor(DRW::AC1018, 0);  // background color (ByBlock)
+        encoded.putBitLong(1);               // content layout
+        encoded.putBitLong(0);               // format property overrides
+        encoded.putBitLong(0);               // format property flags
+        encoded.putBitLong(512);             // value data type
+        encoded.putBitLong(0);               // value unit type
+        encoded.putVariableText(ver, "");    // value format string
+        encoded.putBitDouble(0.0);           // rotation
+        encoded.putBitDouble(1.0);           // block scale
+        encoded.putBitLong(5);               // cell alignment
+        encoded.putCmColor(DRW::AC1018, 7);  // content color
+        encoded.putBitDouble(0.25);          // text height
+        encoded.putBitShort(0);              // no margin overrides
+        encoded.putBitLong(1);               // num_borders
+        encoded.putBitLong(1);               // border edge mask
+        encoded.putBitLong(0);               // border overrides
+        encoded.putBitLong(1);               // border type
+        encoded.putCmColor(DRW::AC1018, 3);  // border color
+        encoded.putBitLong(-2);              // line weight
+        encoded.putBitLong(1);               // visible
+        encoded.putBitDouble(0.045);         // double line spacing
+        encoded.putBitLong(1);               // style id
+        encoded.putBitLong(1);               // style class
+        encoded.putVariableText(ver, "_TITLE");
+        const std::uint32_t bodyEnd = encoded.bitCount();
+        for (int i = 0; i < paddingBits; ++i)
+            encoded.putBit(0);
+        const std::uint32_t handleStart = encoded.bitCount();
+
+        encoded.putHandle(hardPtr(0x70));
+        encoded.putHandle(handleWithCode(0x0A, 0x71));
+        encoded.putHandle(handleWithCode(0x0A, 0x72));
+        encoded.putHandle(hardPtr(0x11)); // content text style
+        encoded.putHandle(hardPtr(0x14)); // border linetype
+        const std::uint32_t handleEnd = encoded.bitCount();
+
+        std::uint32_t objSize = handleStart;
+        switch (objectSize) {
+        case ObjectSize::HandleStart:
+            break;
+        case ObjectSize::BeforeBodyEnd:
+            objSize = bodyEnd - 8u;
+            break;
+        case ObjectSize::PastBuffer:
+            objSize = static_cast<std::uint32_t>((encoded.size() + 8u) * 8u);
+            break;
+        case ObjectSize::AfterHandles:
+            objSize = handleEnd;
+            break;
+        }
+        encoded.patchRawLong32AtBit(objectSizeBitOffset(encoded), objSize);
+        return snapshot(encoded);
+    };
+
+    // Padding bits may separate the data stream from the handle stream that
+    // objSize points at; the handles are still read from that boundary.
+    struct Layout {
+        DRW::Version ver;
+        int paddingBits;
+    };
+    for (const Layout layout :
+         {Layout{DRW::AC1015, 0}, Layout{DRW::AC1018, 0},
+          Layout{DRW::AC1015, 5}, Layout{DRW::AC1018, 5}}) {
+        const DRW::Version ver = layout.ver;
+        CAPTURE(static_cast<int>(ver), layout.paddingBits);
+        auto bytes = encode(ver, layout.paddingBits, ObjectSize::HandleStart);
+        dwgBuffer reader(bytes.data(), bytes.size());
+        DRW_CellStyleMap parsed;
+        REQUIRE(DrwObjectEncodeTestAccess::parse(parsed, ver, &reader));
+        CHECK(static_cast<std::uint32_t>(parsed.parentHandle) == 0x70u);
+        CHECK(parsed.reactorHandles == std::vector<std::uint32_t>{0x71u});
+        CHECK(parsed.xDictHandle == 0x72u);
+        REQUIRE(parsed.m_cellStyles.size() == 1u);
+        const DRW_TableStyleCellStyle& style = parsed.m_cellStyles.front();
+        CHECK(style.m_type == 5);
+        CHECK(style.m_hasData);
+        CHECK(style.m_mergeFlags == 0x8000u);
+        CHECK(style.m_backgroundColor == 0);
+        CHECK(style.m_contentLayout == 1u);
+        CHECK(style.m_contentFormat.m_valueDataType == 512);
+        CHECK(style.m_contentFormat.m_cellAlignment == 5);
+        CHECK(style.m_contentFormat.m_contentColor == 7);
+        CHECK(style.m_contentFormat.m_textStyleHandle == 0x11u);
+        CHECK(style.m_contentFormat.m_textHeight == Approx(0.25));
+        REQUIRE(style.m_borders.size() == 1u);
+        CHECK(style.m_borders.front().m_edgeFlags == 1);
+        CHECK(style.m_borders.front().m_color == 3);
+        CHECK(style.m_borders.front().m_lineWeight == -2);
+        CHECK(style.m_borders.front().m_lineTypeHandle == 0x14u);
+        CHECK(style.m_borders.front().m_doubleLineSpacing == Approx(0.045));
+        CHECK(style.m_id == 1);
+        CHECK(style.m_styleClass == 1);
+        CHECK(style.m_name == "_TITLE");
+    }
+
+    // objSize must sit between the end of the data stream and the handle
+    // stream. One inside the body or past the buffer is rejected, and so is
+    // one at the end of the handles, because it leaves no handle data to
+    // read (a frame with bytes after its handles could not tell). Nothing is
+    // published and the handle the preamble set is cleared again.
+    for (const DRW::Version ver : {DRW::AC1015, DRW::AC1018}) {
+        for (const ObjectSize objectSize :
+             {ObjectSize::BeforeBodyEnd, ObjectSize::PastBuffer,
+              ObjectSize::AfterHandles}) {
+            CAPTURE(static_cast<int>(ver), static_cast<int>(objectSize));
+            auto bytes = encode(ver, 0, objectSize);
+            dwgBuffer reader(bytes.data(), bytes.size());
+            DRW_CellStyleMap rejected;
+            rejected.parentHandle = 0x99;
+            rejected.reactorHandles.push_back(0x98);
+            rejected.xDictHandle = 0x97;
+            CHECK_FALSE(DrwObjectEncodeTestAccess::parse(rejected, ver,
+                                                         &reader));
+            CHECK_FALSE(reader.isGood());
+            CHECK(rejected.m_cellStyles.empty());
+            CHECK(rejected.handle == 0u);
+            CHECK(rejected.parentHandle == 0);
+            CHECK(rejected.reactorHandles.empty());
+            CHECK(rejected.xDictHandle == 0u);
+        }
+    }
 }
 
 TEST_CASE("DRW_IDBuffer captures common and object handles",

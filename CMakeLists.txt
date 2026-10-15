@@ -2748,6 +2748,7 @@ if (BUILD_TESTS)
         librecad/src/lib/filters/tests/i18n_caret_nfc_tests.cpp
         librecad/src/lib/filters/tests/dwg_decompress18_tests.cpp
         librecad/src/lib/filters/tests/dwg_object_frame_tests.cpp
+        librecad/src/lib/filters/tests/dwg_classes_crc_tests.cpp
         librecad/src/lib/filters/tests/dwg_safety_tests.cpp
         librecad/src/lib/filters/tests/dwg_tarch_tests.cpp
         librecad/src/lib/filters/tests/datastorage_tests.cpp
@@ -3108,6 +3109,7 @@ if (BUILD_TESTS)
         librecad/src/lib/filters/tests/dwg_handseed_tests.cpp
         librecad/src/lib/filters/tests/dwg_object_encode_round_trip_tests.cpp
         librecad/src/lib/filters/tests/dwg_object_frame_tests.cpp
+        librecad/src/lib/filters/tests/dwg_classes_crc_tests.cpp
         librecad/src/lib/filters/tests/dwg_safety_tests.cpp
         librecad/src/lib/filters/tests/dxf_attribute_tests.cpp
         librecad/src/lib/filters/tests/dxf_object_tests.cpp
@@ -3168,6 +3170,7 @@ if (BUILD_TESTS)
         librecad/src/lib/filters/tests/dwg_handseed_tests.cpp
         librecad/src/lib/filters/tests/dwg_object_encode_round_trip_tests.cpp
         librecad/src/lib/filters/tests/dwg_object_frame_tests.cpp
+        librecad/src/lib/filters/tests/dwg_classes_crc_tests.cpp
         librecad/src/lib/filters/tests/dwg_safety_tests.cpp
         librecad/src/lib/filters/tests/eed_tests.cpp
         librecad/src/lib/filters/tests/datastorage_tests.cpp
@@ -3512,6 +3515,7 @@ if (BUILD_TESTS)
         librecad/src/lib/filters/tests/dynblock_tests.cpp
         librecad/src/lib/filters/tests/dwg_object_encode_round_trip_tests.cpp
         librecad/src/lib/filters/tests/dwg_object_frame_tests.cpp
+        librecad/src/lib/filters/tests/dwg_classes_crc_tests.cpp
         librecad/src/lib/filters/tests/dwg_safety_tests.cpp
         librecad/src/lib/filters/tests/mesh_tests.cpp
     )

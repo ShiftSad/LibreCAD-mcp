@@ -6553,17 +6553,68 @@ TEST_CASE("DXF DICTIONARY rejects malformed entry pairs atomically",
     CHECK(cap.m_callCount == 0);
   }
 
-  SECTION("an empty name or null target") {
+  SECTION("an empty name with a live target") {
     DictionaryCapture emptyName;
     CHECK_FALSE(tryReadDxf(prefix + "3\n\n350\n2A\n" + suffix, emptyName,
                            "lc_dictionary_empty_entry_name.dxf"));
     CHECK(emptyName.m_callCount == 0);
+  }
 
+  SECTION("an empty name with a null target is dropped") {
+    // Empty-named null slots appear in the named-object dictionary and the
+    // FBXASSET/ACAD_XREC_ROUNDTRIP extension dictionaries of AutoCAD files;
+    // the DWG reader drops the same pair.
+    DictionaryCapture emptyNull;
+    CHECK(tryReadDxf(prefix + "3\n\n350\n0\n3\nKEPT\n350\n2A\n"
+                         + "3\n\n360\n0\n" + suffix,
+                     emptyNull, "lc_dictionary_empty_name_null_target.dxf"));
+    REQUIRE(emptyNull.m_callCount == 1);
+    REQUIRE(emptyNull.m_captured.m_entries.size() == 1);
+    CHECK(emptyNull.m_captured.m_entries[0].m_name == "KEPT");
+    CHECK(emptyNull.m_captured.m_entries[0].m_handle == 0x2Au);
+
+    // An empty name stays pending until its handle arrives.
+    DictionaryCapture dangling;
+    CHECK_FALSE(tryReadDxf(prefix + "3\n\n3\nKEPT\n350\n2A\n" + suffix,
+                           dangling,
+                           "lc_dictionary_empty_name_without_handle.dxf"));
+    CHECK(dangling.m_callCount == 0);
+  }
+
+  SECTION("a null target names no member and is dropped") {
+    // AutoCAD writes ACAD_PARALLEL_BACKGROUND with no object in the
+    // named-object dictionary's ACAD_BACKGROUND dictionary; the DWG reader
+    // drops the same pair.
     DictionaryCapture nullTarget;
-    CHECK_FALSE(tryReadDxf(prefix + "3\nNULL\n350\n0\n" + suffix,
-                           nullTarget,
-                           "lc_dictionary_null_entry_target.dxf"));
-    CHECK(nullTarget.m_callCount == 0);
+    CHECK(tryReadDxf(prefix + "3\nNULL\n350\n0\n3\nKEPT\n350\n2A\n"
+                         + "3\nHARD_NULL\n360\n0\n" + suffix,
+                     nullTarget, "lc_dictionary_null_entry_target.dxf"));
+    REQUIRE(nullTarget.m_callCount == 1);
+    REQUIRE(nullTarget.m_captured.m_entries.size() == 1);
+    CHECK(nullTarget.m_captured.m_entries[0].m_name == "KEPT");
+    CHECK(nullTarget.m_captured.m_entries[0].m_handle == 0x2Au);
+
+    // A name still needs a following handle when its target is null.
+    DictionaryCapture dangling;
+    CHECK_FALSE(tryReadDxf(prefix + "3\nNULL\n350\n0\n350\n2A\n" + suffix,
+                           dangling,
+                           "lc_dictionary_null_entry_extra_handle.dxf"));
+    CHECK(dangling.m_callCount == 0);
+  }
+
+  SECTION("the hard-owner flag must precede every entry pair") {
+    DictionaryCapture afterEntry;
+    CHECK_FALSE(tryReadDxf(prefix + "3\nKEPT\n350\n2A\n280\n1\n" + suffix,
+                           afterEntry,
+                           "lc_dictionary_hard_owner_after_entry.dxf"));
+    CHECK(afterEntry.m_callCount == 0);
+
+    // A dropped null pair still opens the entry list.
+    DictionaryCapture afterNull;
+    CHECK_FALSE(tryReadDxf(prefix + "3\nNULL\n350\n0\n280\n1\n" + suffix,
+                           afterNull,
+                           "lc_dictionary_hard_owner_after_null_entry.dxf"));
+    CHECK(afterNull.m_callCount == 0);
   }
 
   SECTION("the entry reference code need not match hard-owner") {
