@@ -873,9 +873,12 @@ TEST_CASE("An R12 or R14 DXF holds no LAYOUT, and a LAYOUT names a block record 
     CHECK(writer.exportReport().contains(QStringLiteral("2 object(s) on paper-space layouts")));
     const WrittenLayouts inR14 = writtenLayouts(r14);
     CHECK(inR14.layouts.empty());
+    for (const auto& [handle, record] : inR14.blockRecords)
+        CHECK(record.layout.empty());
     CHECK(lc::test::fileBytes(r14).find("ACAD_LAYOUT") == std::string::npos);
 
-    // In R2000 and later, each LAYOUT names a block record written.
+    // In R2000 and later, each LAYOUT names a block record written, which
+    // points back at it.
     for (const RS2::FormatType format : {RS2::FormatDXFRW2000, RS2::FormatDXFRW2018}) {
         CAPTURE(static_cast<int>(format));
         const auto saved = directory.file("saved_" + std::to_string(static_cast<int>(format)) + ".dxf");
@@ -886,7 +889,8 @@ TEST_CASE("An R12 or R14 DXF holds no LAYOUT, and a LAYOUT names a block record 
         for (const auto& [name, layout] : written.layouts) {
             CAPTURE(name);
             const auto record = written.blockRecords.find(layout.blockRecord);
-            CHECK(record != written.blockRecords.end());
+            REQUIRE(record != written.blockRecords.end());
+            CHECK(record->second.layout == layout.handle);
         }
         CHECK(written.blockRecords.at(written.layouts.at("Model").blockRecord).name == "*Model_Space");
         CHECK(written.blockRecords.at(written.layouts.at("Layout1").blockRecord).name == "*Paper_Space");
@@ -923,6 +927,47 @@ TEST_CASE("A LAYOUT whose paper space is not written is not written either",
         CAPTURE(name);
         CHECK(written.blockRecords.count(layout.blockRecord) == 1);
     }
+}
+
+TEST_CASE("A DWG lists the dictionary of its layouts in its root",
+          "[dxf][dwg][paper-space]") {
+    REQUIRE(lc::test::ensureSettings());
+    lc::test::QuietLog quiet;
+    lc::test::OutputDirectory directory("lc_dxf_paper_space_dwg_root");
+    const auto source = directory.file("layouts_r2000.dxf");
+    writeText(source, layoutsDxf());
+    RS_Graphic graphic;
+    REQUIRE(lc::test::importDrawing(graphic, source, RS2::FormatDXFRW));
+
+    const auto [format, name] = GENERATE(table<RS2::FormatType, const char*>(
+        {{RS2::FormatDWG, "r2000"}, {RS2::FormatDWG2018, "r2018"}}));
+    CAPTURE(name);
+    const auto saved = directory.file(std::string("saved_") + name + ".dwg");
+    RS_FilterDXFRW writer;
+    REQUIRE(writer.fileExport(graphic, lc::test::toQString(saved), format));
+
+    RS_Graphic reopened;
+    REQUIRE(lc::test::importDrawing(reopened, saved, RS2::FormatDWG));
+    const auto& metadata = reopened.dwgAdvancedMetadata();
+    REQUIRE(metadata.layouts().size() == 3);
+    const std::uint32_t layoutDictionary = metadata.layouts().front().parentHandle;
+    for (const auto& layout : metadata.layouts())
+        CHECK(layout.parentHandle == layoutDictionary);
+    // A reader finds the layouts under ACAD_LAYOUT in the root, and nowhere
+    // else.
+    int roots = 0;
+    bool listed = false;
+    for (const auto& dictionary : metadata.dictionaries()) {
+        if (dictionary.parentHandle != 0)
+            continue;
+        ++roots;
+        for (const auto& entry : dictionary.entries) {
+            if (entry.name == "ACAD_LAYOUT")
+                listed = entry.handle == layoutDictionary;
+        }
+    }
+    CHECK(roots == 1);
+    CHECK(listed);
 }
 
 TEST_CASE("A layout a DWG cannot write is left out of a DWG save, and known to be before it",

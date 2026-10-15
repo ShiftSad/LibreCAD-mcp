@@ -237,7 +237,8 @@ protected:
     /// Phase 4d helper: emit a full Block_Record at `handle` with the
     /// `block`/`endBlock` handles pointing at DRW_Block entities the
     /// caller has already emitted.  The owned entity and INSERT lists are
-    /// supplied separately; layout remains null for freshly written blocks.
+    /// supplied separately; the layout pointer names the LAYOUT written for
+    /// this record (writtenLayoutOf()), null when there is none.
     /// Needed so `readDwgBlocks` can resolve
     /// the BLOCK_CONTROL `+2` phantom handles (0x17, 0x18) without
     /// failing the block walk.
@@ -247,6 +248,10 @@ protected:
                          const std::vector<std::uint32_t>& entityHandles,
                          const std::vector<std::uint32_t>& insertHandles = {},
                          int insUnits = 0);
+    /// The handle of the LAYOUT whose paper space is the block record
+    /// @p blockRecordHandle, if writeLayout() wrote one that is still in the
+    /// object map; 0 otherwise.
+    std::uint32_t writtenLayoutOf(std::uint32_t blockRecordHandle) const;
 
     /// Phase 4d helper: emit a Block entity at `handle`.  `isEnd=true`
     /// suppresses the name field and emits an ENDBLK (oType=5) rather
@@ -640,6 +645,9 @@ private:
     std::vector<std::uint32_t> m_paperSpaceEntityHandles;
     std::vector<std::uint32_t> m_modelSpaceInsertHandles;
     std::vector<std::uint32_t> m_paperSpaceInsertHandles;
+    // (block record, LAYOUT) for each LAYOUT writeLayout() wrote, in order:
+    // a BLOCK_RECORD points back at the layout of its paper space.
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> m_writtenLayouts;
 };
 
 #endif // DWGWRITER15_H

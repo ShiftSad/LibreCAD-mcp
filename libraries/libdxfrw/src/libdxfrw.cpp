@@ -7059,6 +7059,23 @@ bool dxfRW::writeBlockRecord(
     return true;
 }
 
+void dxfRW::setBlockRecordLayouts(
+    const std::map<std::string, std::uint32_t> &layouts) {
+    m_blockRecordLayouts.clear();
+    for (const auto &[name, handle] : layouts) {
+        if (handle != DRW::NoHandle)
+            m_blockRecordLayouts.emplace(dxfSymbolNameKey(name), handle);
+    }
+}
+
+void dxfRW::writeBlockRecordLayout(const std::string &name) {
+    if (version <= DRW::AC1014)
+        return;
+    const auto layout = m_blockRecordLayouts.find(dxfSymbolNameKey(name));
+    if (layout != m_blockRecordLayouts.end())
+        writer->writeString(340, toHexStr(layout->second));
+}
+
 bool dxfRW::emitBlockRecord(const PendingDxfBlockRecord& record) {
     if (writer == nullptr || version <= DRW::AC1009 || record.handle == 0
         || record.name.empty()) {
@@ -7072,6 +7089,7 @@ bool dxfRW::emitBlockRecord(const PendingDxfBlockRecord& record) {
     writer->writeString(100, "AcDbSymbolTableRecord");
     writer->writeString(100, "AcDbBlockTableRecord");
     writer->writeUtf8String(2, record.name);
+    writeBlockRecordLayout(record.name);
     if (version > DRW::AC1018) {
         writer->writeInt16(70, record.insUnits);
         writer->writeInt16(280, 1);
@@ -7458,8 +7476,8 @@ bool dxfRW::writeTables() {
         writer->writeString(100, "AcDbSymbolTableRecord");
         writer->writeString(100, "AcDbBlockTableRecord");
         writer->writeString(2, "*Model_Space");
+        writeBlockRecordLayout("*Model_Space");
         if (version > DRW::AC1018) {
-            //    writer->writeInt16(340, 22);
             writer->writeInt16(70, 0);
             writer->writeInt16(280, 1);
             writer->writeInt16(281, 0);
@@ -7472,8 +7490,8 @@ bool dxfRW::writeTables() {
         writer->writeString(100, "AcDbSymbolTableRecord");
         writer->writeString(100, "AcDbBlockTableRecord");
         writer->writeString(2, "*Paper_Space");
+        writeBlockRecordLayout("*Paper_Space");
         if (version > DRW::AC1018) {
-            //    writer->writeInt16(340, 22);
             writer->writeInt16(70, 0);
             writer->writeInt16(280, 1);
             writer->writeInt16(281, 0);

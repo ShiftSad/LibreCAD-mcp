@@ -13107,6 +13107,23 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
       if (attachedToRoot.count(layout.parentHandle) != 0)
         m_dxfLayoutDictionaryHandles.insert(layout.parentHandle);
     }
+    // Each model or paper space block record points back at the LAYOUT
+    // written for it (group 340), as that LAYOUT names the record.
+    std::map<std::string, std::uint32_t> blockRecordLayouts;
+    for (const auto &layout : metadata.layouts()) {
+      const auto record =
+          metadata.spaceBlockRecords().find(layout.paperSpaceBlockRecordHandle);
+      if (record == metadata.spaceBlockRecords().end() ||
+          !writesLayout(layout) ||
+          rawObjectHandles.count(layout.handle) != 0)
+        continue;
+      const QString name = QString::fromUtf8(record->second.c_str());
+      if (LC_PaperSpaceStore::isModelSpaceName(name) ||
+          LC_PaperSpaceStore::isPaperSpaceName(name))
+        blockRecordLayouts.emplace(record->second,
+                                   m_dxfW->remapHandle(layout.handle));
+    }
+    m_dxfW->setBlockRecordLayouts(blockRecordLayouts);
   }
 
   // A layout other than the active one needs a *Paper_SpaceN block: R2000
@@ -19087,6 +19104,83 @@ void RS_FilterDXFRW::writeDwgClasses() {
     }
   }
   const auto &metadata = m_graphic->dwgAdvancedMetadata();
+  // The root dictionary lists the dictionaries the file keeps under the
+  // names the source's root gave them: ACAD_LAYOUT, where a reader looks for
+  // the layouts, and ACAD_PLOTSETTINGS, ACAD_MLINESTYLE, ACAD_PLOTSTYLENAME
+  // or any other the OBJECTS pass writes natively. The dictionary of the
+  // layouts, when the source's root does not name it (LibreCAD's own DWG
+  // listed ACAD_GROUP alone), is ACAD_LAYOUT. Registered before the root is
+  // emitted, so only what writeObjects() writes: a listed dictionary without
+  // its object fails the save.
+  {
+    const DRW::Version version = m_dwgW->getVersion();
+    const auto &dictionaries = metadata.dictionaries();
+    std::set<std::uint32_t> ownerGraphChildren;
+    for (const auto &entry : m_dwgExportAdmissionPlan.opaqueTableRecordIndexes) {
+      if (entry.second.ownerGraph.has_value())
+        ownerGraphChildren.insert(entry.second.ownerGraph->childSourceHandle);
+    }
+    // The output handle of a dictionary written as nativeDictionaryHandles
+    // selects it in writeObjects(), or 0.
+    const auto writtenDictionary =
+        [&](const LC_DwgAdvancedMetadata::DictionaryRecord &record)
+        -> std::uint32_t {
+      if (version < DRW::AC1015 || record.handle == 0 ||
+          record.replayState !=
+              LC_DwgAdvancedMetadata::ReplayState::ReplayAllowed ||
+          record.handle == DRW::DwgNamedObjectsDictionaryHandle ||
+          record.handle == DRW::DwgAcadGroupDictionaryHandle ||
+          ownerGraphChildren.count(record.handle) != 0 ||
+          isDwgDataStorageRawSelected(record.handle) ||
+          !canWriteDwgDictionaryRecord(metadata, record, version))
+        return 0;
+      const DwgWriteReferenceStatus status =
+          resolveDwgWriteObjectHandle(record.handle);
+      if (status != DwgWriteReferenceStatus::Resolved &&
+          status != DwgWriteReferenceStatus::Selected)
+        return 0;
+      const std::uint32_t output = resolveDwgWriteHandle(record.handle);
+      return output == DRW::DwgNamedObjectsDictionaryHandle ||
+                     output == DRW::DwgAcadGroupDictionaryHandle
+                 ? 0
+                 : output;
+    };
+    const auto findDictionary = [&dictionaries](std::uint32_t handle,
+                                                std::uint32_t parent) {
+      return std::find_if(dictionaries.cbegin(), dictionaries.cend(),
+                          [handle, parent](const auto &record) {
+                            return record.handle == handle &&
+                                   (parent == 0 || record.parentHandle == parent);
+                          });
+    };
+    std::set<std::uint32_t> listed;
+    const auto list = [this, &listed](const std::string &name,
+                                      std::uint32_t output) {
+      // The writer refuses a name the root already lists.
+      if (output != 0 && listed.count(output) == 0 &&
+          m_dwgW->registerDwgNamedObjectDictionaryEntry(name, output))
+        listed.insert(output);
+    };
+    for (const auto &root : dictionaries) {
+      if (root.parentHandle != 0 || root.handle == 0)
+        continue;
+      for (const auto &entry : root.entries) {
+        if (entry.name.empty() || entry.name == "ACAD_GROUP")
+          continue;
+        const auto child = findDictionary(entry.handle, root.handle);
+        if (child != dictionaries.cend())
+          list(entry.name, writtenDictionary(*child));
+      }
+    }
+    for (const auto &layout : metadata.layouts()) {
+      if (!writesLayoutObject(layout, m_version, true))
+        continue;
+      const auto dictionary = findDictionary(layout.parentHandle, 0);
+      if (dictionary != dictionaries.cend())
+        list("ACAD_LAYOUT", writtenDictionary(*dictionary));
+      break;
+    }
+  }
   const bool canWriteModernObjects = m_dwgW->getVersion() >= DRW::AC1021;
   const bool canWriteAssociativeObjects = canWriteModernObjects;
   // PR 13f — custom-class registration gate for the RasterVariables /

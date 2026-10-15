@@ -1237,7 +1237,8 @@ bool dwgWriter15::emitBlockRecord(std::uint32_t handle,
     hdlBuf->putHandle(makeHardOwner(endBlockHandle)); // ENDBLK entity
     for (std::uint32_t insertHandle : insertHandles)
         hdlBuf->putHandle(makeSoftPointer(insertHandle));
-    hdlBuf->putHandle(makeHardPointer(0));            // layoutH null
+    // The LAYOUT of a model or paper space, as the LAYOUT names this record.
+    hdlBuf->putHandle(makeHardPointer(writtenLayoutOf(handle)));
 
     finishObject();
     if (objectWriteFailed())
@@ -2529,6 +2530,21 @@ bool dwgWriter15::emitLayoutObject(std::uint32_t handle,
     return !objectWriteFailed();
 }
 
+std::uint32_t dwgWriter15::writtenLayoutOf(std::uint32_t blockRecordHandle) const {
+    if (blockRecordHandle == 0)
+        return 0;
+    for (const auto& [record, layout] : m_writtenLayouts) {
+        // A LAYOUT a failed compound write took back has no frame any more.
+        if (record == blockRecordHandle
+            && std::any_of(m_objectMap.cbegin(), m_objectMap.cend(),
+                           [layout = layout](const auto& entry) {
+                               return entry.first == layout;
+                           }))
+            return layout;
+    }
+    return 0;
+}
+
 bool dwgWriter15::writeLayout(const DRW_Layout& layout) {
     if (layout.viewportCount < 0
         || layout.viewportCount > DRW_Layout::kMaxViewportCount
@@ -2553,6 +2569,9 @@ bool dwgWriter15::writeLayout(const DRW_Layout& layout) {
         m_objectEedWriteFailure = !object.extData.empty();
         return false;
     }
+    if (object.paperSpaceBlockRecordHandle.ref != 0)
+        m_writtenLayouts.emplace_back(object.paperSpaceBlockRecordHandle.ref,
+                                      object.handle);
     return true;
 }
 

@@ -290,6 +290,11 @@ public:
     void setRootDictEntries(const std::vector<std::pair<std::string, std::string>> &entries) {
         m_rootDictEntries = entries;
     }
+    /*!< The LAYOUT each model or paper space block record belongs to, by
+     * block record name: its BLOCK_RECORD points back at that LAYOUT (group
+     * 340, R2000 and later). The filter names the layouts it writes before
+     * write(); empty by default. */
+    void setBlockRecordLayouts(const std::map<std::string, std::uint32_t> &layouts);
     /*!< Register named-dictionary OBJECTS to emit verbatim in the regenerated
      * OBJECTS section (DXF write path only). Each carries its source code-5
      * handle, parent (330) owner, and entry (name -> child handle) list. The
@@ -679,6 +684,10 @@ private:
     bool m_dxfClassesFrozen {false};
     std::vector<DRW_RawDxfSection> m_rawDxfSections;
     std::vector<std::pair<std::string, std::string>> m_rootDictEntries;
+    /// setBlockRecordLayouts(), by dxfSymbolNameKey() of the record name.
+    std::map<std::string, std::uint32_t> m_blockRecordLayouts;
+    /// Writes the 340 of the block record @p name, if it has a layout.
+    void writeBlockRecordLayout(const std::string &name);
     /// Named-dictionary OBJECTS to emit verbatim in writeObjects (DXF path).
     /// Populated via setNamedDictObjects; empty by default so a fresh write is
     /// byte-identical.
