@@ -168,6 +168,10 @@ async def test_the_client_tells_librecad_its_deadline():
         await c.open_document("C:/a.dxf")  # 50 s
     assert status.calls.last.request.headers["x-request-timeout-ms"] == "4500"
     assert open_.calls.last.request.headers["x-request-timeout-ms"] == "48000"
+    # a whole number of ms, at most 10 minutes: LibreCAD refuses anything else (400 bad_header)
+    async with LibreCadClient(Config(BASE, "tok", 3600.0, "LIBRECAD_API_TOKEN")) as c:
+        await c.status()
+    assert status.calls.last.request.headers["x-request-timeout-ms"] == "600000"
 
 
 def test_proxies_from_the_environment_are_ignored(monkeypatch):

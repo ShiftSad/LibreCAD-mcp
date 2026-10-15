@@ -840,6 +840,19 @@ class FakeLibreCAD:
             errors[f"entities[{i}].style"] = "unknown text style"
         if t == "text" and spec.get("halign") in ("aligned", "fit") and "second_point" not in spec:
             errors[f"entities[{i}].second_point"] = "aligned and fit text need a second_point"
+        if t == "text":
+            # what LibreCAD derives for these alignments (a new text: none of it may be given)
+            h = spec.get("halign")
+            if h == "aligned" and spec.get("height") is not None:
+                errors[f"entities[{i}].height"] = "aligned text takes its height from position and second_point"
+            if h != "aligned" and spec.get("height") is None:
+                errors[f"entities[{i}].height"] = "missing"
+            if h in ("aligned", "fit") and spec.get("angle_deg") is not None:
+                errors[f"entities[{i}].angle_deg"] = f"{h} text takes its angle from position to second_point"
+            if h in ("aligned", "fit") and spec.get("width_factor") not in (None, 1, 1.0):
+                errors[f"entities[{i}].width_factor"] = f"{h} text does not use width_factor"
+            if h in ("aligned", "fit", "middle") and spec.get("valign") not in (None, "baseline"):
+                errors[f"entities[{i}].valign"] = f"{h} text sits on its baseline"
 
     def h_create(self, q, body):
         allow_only(body, {"entities", "layer", "select"})

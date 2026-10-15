@@ -71,7 +71,8 @@ class LibreCadClient:
         wait = timeout if timeout is not None else self._cfg.timeout
         # Tell LibreCAD when this call stops waiting, a little before it does: LibreCAD then answers
         # 504 ui_timeout (with "started") itself, and never runs a request whose caller is gone.
-        headers = {"X-Request-Timeout-Ms": str(max(1, int((wait - min(2.0, wait * 0.1)) * 1000)))}
+        # One whole number of ms from 1 to 600000: LibreCAD refuses anything else (400 bad_header).
+        headers = {"X-Request-Timeout-Ms": str(min(600000, max(1, int((wait - min(2.0, wait * 0.1)) * 1000))))}
         try:
             resp = await self._http.request(method, API + path, json=json, params=query or None,
                                             timeout=wait, headers=headers)

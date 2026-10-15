@@ -169,8 +169,10 @@ sent anywhere, since another program may have taken the port.
   documents, web pages or tool output. Your "no" in a prompt always wins. A yes is for the drawing
   and the layer the question named: if another drawing became active or the layer changed while
   you were asked, nothing happens and the AI has to ask again.
-- **File paths** must be absolute local paths with the right extension. Network (UNC) paths are
-  refused unless you allow them, here and in LibreCAD's Preferences. You can restrict file access
+- **File paths** must be absolute local paths with the right extension; an existing file must
+  have it in its own name too (a Windows short name such as `KEEPME~1.DXF`, or a link, can name a
+  file of another type), and a question about replacing a file names the file on disk. Network
+  (UNC) paths are refused unless you allow them, here and in LibreCAD's Preferences. You can restrict file access
   to some folders, here (`LIBRECAD_MCP_ALLOWED_ROOTS`) and in LibreCAD (Remote API tab). LibreCAD
   checks every rule again on its side.
 - In LibreCAD's Remote API tab you can turn off command-line access (`run_command`) and the

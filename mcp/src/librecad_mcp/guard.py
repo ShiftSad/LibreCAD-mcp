@@ -24,8 +24,10 @@ FORMAT_EXTENSIONS = {"dxf": ".dxf", "dwg": ".dwg", "pdf": ".pdf", "png": ".png",
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
+# The superscript digits are reserved like the plain ones ("COM\u00b9" is COM1 to Windows).
 _WINDOWS_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", *(f"COM{i}" for i in range(1, 10)),
-                         *(f"LPT{i}" for i in range(1, 10))}
+                         *(f"LPT{i}" for i in range(1, 10)), *(f"{port}{digit}" for port in ("COM", "LPT")
+                                                              for digit in ("\u00b9", "\u00b2", "\u00b3"))}
 
 PathKind = Literal["open", "save", "export"]
 
@@ -81,6 +83,27 @@ def _is_device_namespace(p: str) -> bool:
     local file skips the drive and stream rules; they are not network shares."""
     q = p.replace("/", "\\")
     return q.startswith(("\\\\?\\", "\\\\.\\", "\\??\\"))
+
+
+def _is_device_name(name: str) -> bool:
+    """``COM1.dxf``, ``nul.svg``, ``COM1 .dxf``: the part before the first dot, without trailing
+    spaces and dots, as Windows reads it."""
+    return name.split(".")[0].rstrip(" .").upper() in _WINDOWS_DEVICE_NAMES
+
+
+def resolved_path(path: str) -> str | None:
+    """The real path of an existing file when it differs from ``path`` by more than case: its long
+    name on Windows (``KEEPME~1.DXF`` is ``keepme.dxfold``), the target of a symbolic link, the
+    folder behind a junction. None when the file does not exist or ``path`` is already its name."""
+    try:
+        if not os.path.exists(path):
+            return None
+        real = os.path.realpath(path)
+    except (OSError, ValueError):
+        return None
+    if real.startswith("\\\\?\\") and not real.startswith("\\\\?\\UNC\\"):
+        real = real[4:]
+    return None if os.path.normcase(real) == os.path.normcase(os.path.abspath(path)) else real
 
 
 def check_path(path: str, kind: PathKind, fmt: str | None = None, *, windows: bool | None = None,
@@ -147,7 +170,7 @@ def check_path(path: str, kind: PathKind, fmt: str | None = None, *, windows: bo
     if not name or name in (".", ".."):
         raise BlockedByPolicy("bad_path", "the path names a folder, not a file",
                               "Include the file name and its extension.", path)
-    if windows and name.split(".")[0].upper() in _WINDOWS_DEVICE_NAMES:
+    if windows and _is_device_name(name):
         raise BlockedByPolicy("bad_path", f"{name!r} is a reserved Windows device name",
                               "Choose another file name.", path)
 
@@ -165,6 +188,15 @@ def check_path(path: str, kind: PathKind, fmt: str | None = None, *, windows: bo
         if ext != want:
             raise BlockedByPolicy("extension_mismatch", f"a {fmt} file must end in {want}, got {ext or 'no extension'}",
                                   f"Give the path the {want} extension.", path)
+        # An existing file is judged by its own name too: an 8.3 alias (KEEPME~1.DXF of
+        # keepme.dxfold) or a symbolic link names another file, which would be replaced.
+        real = resolved_path(norm) if native else None
+        if real is not None:
+            real_name = flavor.basename(real)
+            if flavor.splitext(real_name)[1].lower() != want or (windows and _is_device_name(real_name)):
+                raise BlockedByPolicy(
+                    "extension_mismatch", f"{name!r} names the existing file {real_name!r}, which is not a {want} file",
+                    f"Write to a path whose own name ends in {want}; the existing file is {real}.", path)
 
     root_list = allowed_roots(env) if roots is None else roots
     if root_list:

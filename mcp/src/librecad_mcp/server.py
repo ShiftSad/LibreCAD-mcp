@@ -30,7 +30,7 @@ from .fields import (
 )
 from .guard import (
     USER_CONFIRMED_TEXT, Confirmation, allow_override_warnings, can_ask_user, check_path,
-    confirmation_refusal, was_asked,
+    confirmation_refusal, resolved_path, was_asked,
 )
 
 INSTRUCTIONS = """\
@@ -275,7 +275,10 @@ async def _ask_discard(ctx: Context, discard_changes: bool = False,
 
 
 def _overwrite_question(path: str) -> str:
-    return f"Replace the existing file {path}? Its current content will be lost."
+    real = resolved_path(path)
+    # an 8.3 alias, a link or a junction: the user is asked about the file that is replaced
+    where = f"{path} (on disk: {real})" if real is not None else path
+    return f"Replace the existing file {where}? Its current content will be lost."
 
 
 def _ask_overwrite_for(kind: Literal["save", "export"]):

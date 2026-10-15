@@ -22,10 +22,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Paths with control characters (a NUL cuts the name the system opens) are refused, and so are
   `\\?\` and `\\.\` paths even with `LIBRECAD_MCP_ALLOW_NETWORK_PATHS=1`, and a `:` stream in a
   network path.
+- A save or export path that reaches an existing file is judged by that file's own name too: a
+  Windows short name (`KEEPME~1.DXF` of `keepme.dxfold`) or a symbolic link no longer passes the
+  extension rule for a file of another type, and the overwrite question names the file on disk.
+- `COM¹`..`COM³` and `LPT¹`..`LPT³` are refused as device names, like `COM1`, and so are names with
+  spaces or dots before the extension (`COM1 .dxf`).
 
 ### Changed
-- Every request tells LibreCAD the client's deadline (`X-Request-Timeout-Ms`): LibreCAD answers
-  `ui_timeout` (with `started`) before the call gives up, and never runs it afterwards.
+- Every request tells LibreCAD the client's deadline (`X-Request-Timeout-Ms`, a whole number of ms,
+  at most 600000, which LibreCAD now requires): LibreCAD answers `ui_timeout` (with `started`)
+  before the call gives up, and never runs it afterwards.
+- Text specs: `aligned` text takes its height and angle from `position` and `second_point` and
+  `fit` text its angle, so `height` is optional for `aligned` and those fields are refused, as is a
+  `width_factor` for both and a `valign` other than `baseline` for `aligned`, `fit` and `middle`
+  (LibreCAD would drop them; it refuses them too).
 - `create_layer`/`update_layer` take a layer lineweight (`"Default"` or mm); `set_view` takes a
   factor > 1; `insert_block` (and `insert` specs) accept a negative, mirroring scale.
 - The `.mcpb` carries the server and runs it before falling back to git; `LIBRECAD_MCP_SOURCE`

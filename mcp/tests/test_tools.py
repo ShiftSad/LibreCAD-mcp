@@ -437,13 +437,28 @@ async def test_dimensions_report_their_measurement(fake, doc):
 
 
 async def test_text_second_point(fake, doc):
-    aligned = {"type": "text", "position": [0, 0], "text": "x", "height": 1, "halign": "aligned"}
+    aligned = {"type": "text", "position": [0, 0], "text": "x", "halign": "aligned"}
     result = await call_raw("add_entities", {"entities": [aligned]})
     assert result.is_error and "second_point" in result.content[0].text
     assert requests(fake, "POST", "/entities") == []
     out = await call("add_entities", {"entities": [{**aligned, "second_point": [10, 0]}]})
     assert out["created"][0]["second_point"] == [10, 0]
     assert requests(fake, "POST", "/entities")[-1]["body"]["entities"][0]["second_point"] == [10, 0]
+
+
+@pytest.mark.parametrize("extra,word", [
+    ({"halign": "aligned", "second_point": [10, 0], "height": 2}, "height"),
+    ({"halign": "aligned", "second_point": [10, 0], "angle_deg": 30}, "angle_deg"),
+    ({"halign": "fit", "second_point": [10, 0], "height": 2, "angle_deg": 30}, "angle_deg"),
+    ({"halign": "fit", "second_point": [10, 0], "height": 2, "width_factor": 2}, "width_factor"),
+    ({"halign": "middle", "height": 2, "valign": "top"}, "valign"),
+    ({"halign": "left"}, "height"),
+])
+async def test_text_fields_librecad_derives_are_refused(fake, doc, extra, word):
+    # LibreCAD would override them (aligned: height and angle; fit: angle; and the baseline)
+    result = await call_raw("add_entities", {"entities": [{"type": "text", "position": [0, 0], "text": "x", **extra}]})
+    assert result.is_error and word in result.content[0].text
+    assert requests(fake, "POST", "/entities") == []
 
 
 async def test_invalid_entity_passes_on_the_allowed_values(fake, doc):

@@ -191,11 +191,14 @@ class SplineSpec(_Attrs):
 
 class TextSpec(_Attrs):
     """Single-line text. position is the alignment point. halign "aligned" or "fit" also needs
-    second_point, the other end of the baseline."""
+    second_point, the other end of the baseline, and takes its angle from position to second_point
+    (aligned text its height too, so leave those out); aligned, fit and middle text sit on the
+    baseline."""
     type: Literal["text"]
     position: Point
     text: Annotated[str, Field(min_length=1)]
-    height: PositiveNum
+    height: PositiveNum | None = Field(None, description='Required, except for halign "aligned" (leave it out: '
+                                                         'position and second_point give it).')
     angle_deg: Num = 0.0
     halign: Literal["left", "center", "right", "aligned", "middle", "fit"] = "left"
     valign: Literal["baseline", "bottom", "middle", "top"] = "baseline"
@@ -204,12 +207,26 @@ class TextSpec(_Attrs):
     second_point: Point | None = Field(None, description='End of the baseline; required for halign "aligned" or "fit".')
 
     @model_validator(mode="after")
-    def _second_point(self):
-        if self.halign in ("aligned", "fit"):
+    def _alignment(self):
+        given = self.model_fields_set
+        h = self.halign
+        if h in ("aligned", "fit"):
             if self.second_point is None:
-                raise ValueError(f'halign "{self.halign}" needs second_point (the end of the baseline)')
+                raise ValueError(f'halign "{h}" needs second_point (the end of the baseline)')
             if self.second_point == self.position:
                 raise ValueError("second_point must differ from position")
+        # what LibreCAD derives for these alignments (it refuses another value with invalid_entity)
+        if h == "aligned" and "height" in given and self.height is not None:
+            raise ValueError('halign "aligned" takes its height from position and second_point: leave height out')
+        if h != "aligned" and self.height is None:
+            raise ValueError('height is required (only halign "aligned" takes it from second_point)')
+        if h in ("aligned", "fit") and "angle_deg" in given:
+            raise ValueError(f'halign "{h}" takes its angle from position to second_point: leave angle_deg out')
+        if h in ("aligned", "fit") and "width_factor" in given and self.width_factor != 1.0:
+            raise ValueError(f'halign "{h}" stretches the text to second_point, so width_factor is not used: '
+                             'leave it out')
+        if h in ("aligned", "fit", "middle") and self.valign != "baseline":
+            raise ValueError(f'halign "{h}" text sits on its baseline: valign must be "baseline"')
         return self
 
 
