@@ -1,0 +1,80 @@
+# librecad-mcp: tests of the Python MCP server (mcp/) on Linux and Windows.
+#
+# The tests talk to an in-memory fake of LibreCAD's Remote API (mcp/tests/fake_librecad.py),
+# so no LibreCAD build is needed and the run takes a minute or two. The same workflow also
+# runs the self-test of tools/remote-api/e2e_smoke.py, the end-to-end script that drives a
+# real LibreCAD (its full run needs a build and is done locally, see tools/remote-api/README.md).
+
+name: MCP server tests
+
+on:
+  push:
+    branches:
+      - master
+      - 'mcp-*'
+    paths:
+      - 'mcp/**'
+      - 'tools/remote-api/**'
+      - '.github/workflows/mcp-tests.yml'
+  pull_request:
+    paths:
+      - 'mcp/**'
+      - 'tools/remote-api/**'
+      - '.github/workflows/mcp-tests.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+        python: ['3.11', '3.13']
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install uv and Python ${{ matrix.python }}
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: mcp/uv.lock
+
+      # --locked fails when uv.lock is out of date with pyproject.toml instead of updating it.
+      - name: Run the tests
+        run: uv run --locked --extra dev pytest -q
+
+  e2e-selftest:
+    name: e2e_smoke.py --selftest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # Standard library only: no install step. -I keeps the checkout off sys.path.
+      - name: Self-test of the end-to-end script
+        run: python -I tools/remote-api/e2e_smoke.py --selftest
