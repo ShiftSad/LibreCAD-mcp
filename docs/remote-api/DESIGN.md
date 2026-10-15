@@ -115,6 +115,8 @@ void execute(std::shared_ptr<Task> t) {
 }
 ```
 
+Implemented (core): every GUI route, read-only ones included, answers `409 gui_modal_open` (+`window`, `hint`) while the user has a modal dialog open. `/status` is the only exception: it is registered with `gui = false` and posts its own GUI task with `LC_RemoteApiGui::ModalPolicy::Allow`. A raw (PNG) response cannot carry `skipped_dialogs`, so it reports closed dialogs in the `X-LibreCAD-Skipped-Dialogs` header.
+
 **Per-route timeouts:**
 
 | Routes | Timeout |
@@ -257,7 +259,9 @@ Routes still avoid dialogs explicitly: open passes an import error callback, sav
 |---|---|
 | Prefix and version | Everything is under `/api/v1`. `GET /api/v1/status` reports `"api_version":"1.0"`. Additive changes keep v1; breaking changes go to `/api/v2`. |
 | Bodies | Request bodies are JSON objects (`Content-Type` is not enforced). Responses are `application/json; charset=utf-8`, except `/render`. |
-| Unknown fields | Rejected with `400 unknown_field`, never ignored. |
+| Unknown fields | Rejected with `400 unknown_field`, never ignored. Implemented: for a body field the error also lists the accepted keys in `allowed`. Unknown **query** parameters also give `400 unknown_field{field}` on every layer, block, entity, selection and measure route and on `/render` (which adds `allowed`); `doc` is always accepted. |
+| `null` | Implemented: a JSON `null` reads as an absent key (an optional field takes its default; a required one gives `missing_param`). |
+| Document ids | Implemented: `id` is `QC_MDIWindow::getId()`, which starts at **0**: `?doc=0` is a real drawing, not "the active one". |
 | Query values | Percent-decoded (`+` is a space). Multi-valued parameters repeat: `type=line&type=arc`. For `type` only, one comma-separated value is also accepted. Layer names are never comma-split. |
 | Path parameters | Percent-decoded. Clients encode with `quote(x, safe='')`. |
 | Path matching | Exact. Only `?query` may follow, so `/statuses` does not match `/status`. A trailing `/` gives `404 not_found`. |
@@ -276,18 +280,25 @@ Routes still avoid dialogs explicitly: open passes an import error callback, sav
 
 | HTTP | Tokens |
 |---|---|
-| 400 | `bad_request` (parser), `invalid_json`, `body_must_be_object`, `unknown_field`(+`field`), `missing_param`(+`param`), `bad_param`(+`param`, `allowed?`), `bad_path`(+`path`) |
+| 400 | `bad_request` (parser), `invalid_json`, `body_must_be_object`, `unknown_field`(+`field`, `allowed?`), `missing_param`(+`param`), `bad_param`(+`param`, `allowed?`, `min?`/`max?`), `bad_path`(+`path`) |
 | 401 | `unauthorized` |
 | 403 | `origin_not_allowed`, `path_not_allowed`(+`path`), `commands_disabled` |
-| 404 | `not_found` (route only), `unknown_document`, `unknown_entity`(+`ids`), `unknown_layer`(+`name`), `unknown_block`(+`name`), `unknown_view`(+`name`), `file_not_found`(+`path`) |
+| 404 | `not_found` (route only; its `detail` names the method and path), `unknown_document`(+`doc`), `unknown_entity`(+`ids`), `unknown_layer`(+`name`), `unknown_block`(+`name`), `unknown_view`(+`name`), `file_not_found`(+`path`) |
 | 405 | `method_not_allowed`(+`allowed`) |
 | 408 / 411 / 413 / 421 / 431 | `request_timeout` / `length_required` / `body_too_large`(+`limit`) / `bad_host` / `headers_too_large` |
-| 409 | `no_document`, `gui_modal_open`(+`window`), `unsaved_changes`, `file_exists`(+`path`), `file_open_in_other_window`, `document_unnamed`, `cannot_save_in_place`(+`format`), `partial_import`(+`detail`), `layer_exists`, `layer_not_empty`(+`entity_count`), `layer_locked`(+`layer`), `layer_frozen`, `entity_locked`(+`ids`) |
-| 422 | `invalid_entity`(+`errors`: `{"entities[2].radius":"must be > 0"}`), `unsupported_format`(+`allowed`), `extension_mismatch`, `import_failed`(+`detail`), `invalid_hatch_boundary`, `not_closed`(+`ids`), `cannot_rename_layer_0`, `cannot_delete_layer_0`, `too_many`(+`limit`) |
-| 500 | `internal`(+`detail`), `save_failed`, `export_failed`(+`detail`) |
+| 409 | `no_document`, `gui_modal_open`(+`window`), `unsaved_changes`, `file_exists`(+`path`), `file_open_in_other_window`(+`path`, `document?`), `document_unnamed`, `cannot_save_in_place`(+`format`), `partial_import`(+`detail`), `layer_exists`, `layer_not_empty`(+`entity_count`), `layer_locked`(+`layer`), `layer_frozen`, `entity_locked`(+`ids`), `ambiguous_id`(+`ids`) |
+| 422 | `invalid_entity`(+`errors`: `{"entities[2].radius":"must be > 0"}`, `allowed?`: `{"entities[1].lineweight":[…]}`), `unsupported_format`(+`allowed`), `extension_mismatch`, `import_failed`(+`detail`), `invalid_hatch_boundary`, `not_closed`(+`ids`), `cannot_rename_layer_0`, `cannot_delete_layer_0`, `too_many`(+`limit`), `bad_param`(+`param`, `allowed`: an unknown save/export `version`) |
+| 500 | `internal`(+`detail`), `save_failed`(+`path`, `detail`), `export_failed`(+`path`, `detail`) |
 | 501 | `dwg_unsupported` (built without `DWGSUPPORT`) |
 | 503 | `shutting_down` |
 | 504 | `ui_timeout`(+`started`) |
+
+Implemented, at integration:
+- `409` and `504` errors raised by the core carry a `hint`. The MCP server replaces any app `hint` with one that names tools, and keeps the app's text as `app_hint`.
+- `422 invalid_entity` from `POST /entities` gathers every spec error of the batch: shape errors inside a spec (`bad_param`, `unknown_field`, `missing_param`) and semantic ones. `errors` maps each field path to the reason, and `allowed` maps a path to its accepted values where there is a list (lineweights, alignments, …). Errors in the top-level body stay `400`; `PATCH /entities/{id}` answers shape errors with a plain `400`. `POST /entities/transform` uses `invalid_entity` with `errors` keyed by entity id when LibreCAD cannot apply the transform to one of them (a block reference it cannot edit). An unknown hatch pattern is `invalid_entity` with the `pattern` path, not `invalid_hatch_boundary`.
+- `409 ambiguous_id`: two live entities share a lineage that cannot be renewed (§2.6); `GET`/`PATCH`/transform by that id are refused.
+- `422 too_many`: more than 5000 entity specs, or more than 5000 ids in one `ids` list (`param` names the list).
+- `409 layer_locked`: creating on, moving to, or (new) deleting a locked layer that still has entities, or moving them to a locked `move_to` layer.
 
 ### 2.3 Shared schemas
 
@@ -373,29 +384,35 @@ Color conversion goes through `RS_Color::toIntColor()`/`fromIntColor` and `LC_Co
    "gui":{"modal_open":false,"active_action":null}}
   ```
   It uses only public APIs: `doForEachWindow`, `getFileName`, `isModified`, and `getCurrentActionName()` on the active view. When the user has a modal open it still answers; the `gui_modal_open` check is skipped for this route.
+  Implemented: it also reports `port` and `gui.modal_window` (the title of the user's modal dialog, or `null`). Document ids start at 0, so the first drawing is `"id":0`. The startup drawing reports `modified:true` (upstream state).
 - **`GET /routes`** returns `{"api_version":"1.0","routes":[{"method","path","capability","changes_document","timeout_s","summary"}]}`.
 - **`GET /formats`** returns:
   ```json
   {"open":[".dxf",".dwg",".lff",".cxf",".jww",".jwc",".shp"],
-   "save":[{"format":"dxf","versions":["R12","R14","2000","2004","2007","2010","2013","2018"],"default":"2007"},
+   "save":[{"format":"dxf","versions":["R12","R14","2000","2004","2007","2010","2013","2018"],"default":"2007",
+            "labels":{"R12":"DXF R12 (AC1009)", …, "2018":"DXF 2018-2026 (AC1032)"},
+            "aliases":{"AC1009":"R12", …, "R2000":"2000", …, "AC1032":"2018","2019":"2018", …, "2026":"2018"},
+            "extension":".dxf"},
            {"format":"dwg","versions":["2000","2004","2007","2010","2013","2018"],"default":"2018",
-            "labels":{"2018":"AutoCAD 2018-2026 (AC1032)"},"aliases":{"2026":"2018","AC1032":"2018","R2000":"2000"}}],
+            "labels":{"2000":"AutoCAD 2000 (AC1015)", …, "2018":"AutoCAD 2018-2026 (AC1032)"},
+            "aliases":{"AC1015":"2000","R2000":"2000", …, "AC1032":"2018","2019":"2018", …, "2026":"2018"},
+            "extension":".dwg"}],
    "export":["dxf","dwg","pdf","png","svg"]}
   ```
-  Versions are filtered by `RS_FileIO::canExport`.
+  Versions are filtered by `RS_FileIO::canExport`. Implemented: every save format has `labels` for every version, its `extension`, and `aliases`: the AutoCAD code of each version (`AC1032`), the `R`-spelling of the year names (`R2000`), and every AutoCAD release from 2019 to 2026 for the AC1032 version. Version names and aliases match case-insensitively. Without DWG support the `dwg` entry, `.dwg` and the `dwg` export are absent.
 
 #### Documents
 
 - **`GET /documents`** returns `{documents:[Doc], active:int|null}`.
-- **`POST /documents/new`** takes `{activate?:true}` and returns `201 {document:Doc}`. It uses the default template, as `slotFileNewFromDefaultTemplate` does.
+- **`POST /documents/new`** takes `{activate?:true}` and returns `201 {document:Doc}`. It uses the default template, as `slotFileNewFromDefaultTemplate` does. Implemented: the new drawing starts unmodified (without a template, upstream marks it modified while adding the default dimension style, so a close would need `discard_changes`).
 - **`POST /documents/open`** takes `{path, accept_partial?:false}`.
   - Returns `201 {document, warnings}`, or `200 {document, already_open:true}` when the file is already open (that window is activated).
   - Errors: `400 bad_path`, `403 path_not_allowed`, `404 file_not_found`, `422 unsupported_format` (`RS_FileIO::detectFormat` is Unknown), `422 import_failed{detail}`, and `409 partial_import{detail}` for a partial DWG import when `accept_partial` is false.
 - **`POST /documents/activate?doc=`** returns `{document}`.
-- **`POST /documents/save?doc=`** takes `{}` and returns `{document, path, format, left_out:[str]}`. `left_out` comes from `RS_FileIO::lastExportReport()`.
+- **`POST /documents/save?doc=`** takes `{}` and returns `{document, path, format, version, label, left_out:[str]}`. `left_out` comes from `RS_FileIO::lastExportReport()`. Implemented: `version` and `label` were added; saving in place also applies the `AllowedRoots` and network-path rules; a read-only file or one changed on disk gives `500 save_failed{path, detail}`.
   - Errors: `409 document_unnamed{hint:"use save_as"}`; `409 cannot_save_in_place{format}` for formats LibreCAD cannot write back, such as a recovered legacy DXF; `500 save_failed`.
   - It never falls back to a Save-As dialog.
-- **`POST /documents/save_as?doc=`** takes `{path, format:"dxf"|"dwg", version?, overwrite?:false}` and returns `{document, path, format, version, left_out}`.
+- **`POST /documents/save_as?doc=`** takes `{path, format:"dxf"|"dwg", version?, overwrite?:false}` and returns `{document, path, format, version, label, left_out}` (implemented: `label` added; `format` defaults to `dxf`).
   - Like the GUI's Save As, the window now refers to the new file.
   - Errors: `409 file_exists`, `422 bad_param(version, allowed)`, `422 extension_mismatch`, `501 dwg_unsupported`.
 - **`POST /documents/export?doc=`** writes a **copy** and never renames the document. Body:
@@ -404,7 +421,8 @@ Color conversion goes through `RS_Color::toIntColor()`/`fromIntColor` and `LC_Co
    "width?":2000,"height?":1000,"margin_px?":16,"background?":"white|black","monochrome?":false,
    "fit_to_page?":true}
   ```
-  It returns `{path, format, version?, bytes, left_out}`.
+  It returns `{path, format, version?, label?, bytes, left_out}` (`version` and `label` for DXF/DWG).
+  - Implemented: the drawing's own file, or a file another open drawing uses, gives `409 file_open_in_other_window`; `version` with PDF/PNG/SVG gives `400 bad_param`, as does a `margin_px` that leaves no room for the drawing. DXF/DWG export calls `prepareForSave()` as Save does (it may add the standard dimension-arrow blocks) and restores the `modified` flag. PDF is written at 600 dpi (the GUI uses 1200).
   - DXF and DWG use `RS_FileIO::fileExport`.
   - PNG and SVG use `LC_ImageExporter`.
   - PDF uses the document's plot settings. With `fit_to_page`, the plot settings are saved, `fitToPage()` is called, the PDF is written, then the settings and the `modified` flag are restored.
@@ -430,10 +448,12 @@ Color conversion goes through `RS_Color::toIntColor()`/`fromIntColor` and `LC_Co
   - Rendering happens on a **private** viewport, so the user's view never changes.
   - `view` mode takes the bounding box of the live view's four corners via `vp->toWorldFromUi(...)`.
   - An empty drawing renders a blank image plus `X-LibreCAD-Empty: 1`.
+  - Implemented: unknown query parameters give `400 unknown_field`.
 - **`GET /view`** returns a `View`.
 - **`POST /view`** takes `{action:"extents"|"window"|"zoom_in"|"zoom_out"|"pan"|"previous"|"named", min?, max?, factor?:1.5, center?, offset?:[dx,dy], name?}` and returns a `View`.
   - Window coordinates are WCS and are converted with `vp->toUCS()` before `zoomWindow`.
   - `named` uses `restoreNamedView(name)`, or `404 unknown_view`.
+  - Implemented: `named` restores through `viewport->restoreView()` on the target drawing (`restoreNamedView` acts only on the active window and shows a message box for paper-space views); a paper-space view gives `400 bad_param`. A field the action does not use gives `400 bad_param`.
 
 #### Undo and redo
 
@@ -450,7 +470,7 @@ Color conversion goes through `RS_Color::toIntColor()`/`fromIntColor` and `LC_Co
   - `output` is collected by diffing `teHistory->document()->blockCount()`; `prompt` is `lCommand->text()`.
   - The route does **not** cancel the active action.
   - `AllowCommands=false` gives `403 commands_disabled`.
-- **`GET /commands`** returns `{commands:[…]}` from `RS_COMMANDS->complete("")`. The names may be localized.
+- **`GET /commands`** returns `{commands:[…]}` from `RS_COMMANDS->complete("")`. The names may be localized. Implemented: these are the **main** command names only (for example `line2p`); aliases such as `line`, `li` or `l` work in `/command` but cannot be listed, because `RS_Commands` has no public alias accessor.
 
 #### Layers (not undoable)
 
@@ -467,6 +487,7 @@ Color conversion goes through `RS_Color::toIntColor()`/`fromIntColor` and `LC_Co
   - `move` changes the entities' layer **undoably** first (`RS_Modification::changeAttributes`), then removes the layer.
   - Deleting the current layer activates "0" first.
   - `422 cannot_delete_layer_0`.
+  - Implemented: `deleted` is the layer name. A locked layer that still has entities, or a locked `move_to` layer, gives `409 layer_locked{layer}` before anything changes. The move is a clone + `setLayer` + replace in one undo step (same effect as `changeAttributes`), and the undo history is retargeted so no undo step points at the freed layer. `PATCH /layers/{name}` and `POST /blocks/{name}/insert` responses include `"undoable"`.
 
 #### Blocks
 
@@ -497,6 +518,7 @@ Color conversion goes through `RS_Color::toIntColor()`/`fromIntColor` and `LC_Co
   - The layer defaults to `spec.layer`, then the body's `layer`, then the current layer.
   - An unknown layer gives `404 unknown_layer`; a locked layer gives `409 layer_locked`; a frozen layer adds the warning `layer_frozen`.
   - With no attributes given, the pen is ByLayer (`dontSetActiveLayerAndPen()`); this is a deliberate choice for the AI.
+  - Implemented: spec errors are gathered into one `422 invalid_entity{errors, allowed?}` (§2.2); more than 5000 specs give `422 too_many{limit}`; an `insert` of an unknown block gives `404 unknown_block{name, param}` and nothing is created.
 - **`PATCH /entities/{id}`** takes `Attrs ∪ geometry fields of that type` and returns `{entity}` with the **same id**.
   - It clones the entity, edits the clone, then `ctx.replace`.
   - Changing `type` gives `400 bad_param`. A field from another type gives `400 unknown_field`. A locked entity gives `409 entity_locked`.
@@ -513,6 +535,7 @@ Color conversion goes through `RS_Color::toIntColor()`/`fromIntColor` and `LC_Co
   - It uses `RS_Modification::{move,rotate,scale,mirror}` inside `undoableModify` with `dontSetActiveLayerAndPen()`.
   - It is refused with `409 entity_locked` before anything runs; this matters because `undoableExecute` silently skips locked deletes while still adding clones.
   - Moved entities keep their id. Copies get a new lineage, and therefore a new id.
+  - Implemented: transform builds its results with its own clone loop and the same entity calls instead of `RS_Modification::{move,rotate,scale,mirror}`, so a circle scaled non-isotropically into an ellipse keeps its id. A block reference LibreCAD cannot edit gives `422 invalid_entity` with `errors` keyed by id, and nothing changes.
 - **`GET /selection`** returns `{ids, count}`.
 - **`POST /selection`** takes `{mode:"set"|"add"|"remove"|"clear"|"all", ids?, bbox?:[x1,y1,x2,y2], bbox_mode?, type?:[…], layer?:[…]}` and returns `{ids, count}`. It calls `notifyChanged()` afterwards.
 - **`POST /measure`** (read-only) takes one of:
@@ -528,6 +551,7 @@ Color conversion goes through `RS_Color::toIntColor()`/`fromIntColor` and `LC_Co
 
   - Area uses `|areaLineIntegral()|` for closed polylines, circles, full ellipses and closed splines; `RS_Hatch::getTotalArea()` for hatches; and the shoelace formula for `points`. Open entities give `422 not_closed{ids}`.
   - Intersections use `RS_Information::getIntersection(e1, e2, true)`.
+  - Implemented: `length` of an entity that has none (text, hatch, point, insert, …) gives `400 bad_param{ids}`. Measured angles are unsigned, 0 to 180.
 
 ### 2.6 Entity specs and ids
 
@@ -542,12 +566,14 @@ Input and output use the same flat field names. Output adds the derived read-onl
 | `point` | `position` |
 | `polyline` | `vertices:[[x,y] \| [x,y,bulge]]` (≥2), `closed:false`; built with `setClosed()` then `addVertex(v, bulge)`; *(out)* `vertex_count, length, area` (if closed) |
 | `spline` | **either** `control_points:[P]` (≥degree+1), `degree:3` (1..3) for `RS_Spline`, **or** `fit_points:[P]` (≥2) for `LC_SplinePoints`; `closed:false` |
-| `text` | `position, text, height>0, angle_deg:0, halign:"left"\|"center"\|"right"\|"aligned"\|"middle"\|"fit", valign:"baseline"\|"bottom"\|"middle"\|"top", style:"standard", width_factor:1` |
+| `text` | `position, text, height>0, angle_deg:0, halign:"left"\|"center"\|"right"\|"aligned"\|"middle"\|"fit", valign:"baseline"\|"bottom"\|"middle"\|"top", style:"standard", width_factor:1, second_point?` (implemented: the end of the baseline, **required** for `aligned` and `fit` and distinct from `position`; output only for those two) |
 | `mtext` | `position, text, height>0, width:0, angle_deg:0, attachment:"top_left"…"bottom_right", line_spacing:1, style:"standard"` |
 | `dimension` | `dim_type:"linear"` → `p1, p2, line_point, angle_deg:0` (0 horizontal, 90 vertical); `"aligned"` → `p1, p2, line_point`; `"radial"` → `center, point, leader_length?`; `"diametric"` → `point, opposite_point`; `"angular"` → `line1:[P,P], line2:[P,P], arc_point`; common `text:""` (empty means measured), `style?` (default `getDefaultDimStyleName()`); *(out)* `measurement` |
 | `hatch` | `pattern:"SOLID", scale:1, angle_deg:0` with `boundary:[[P…] \| {vertices, closed:true}]` (inline loops, cloned into the loop containers) **or** `boundary_ids:[id]` (closed entities, cloned as `RS_ActionDrawHatch` does); then `validate()`, `update()`, and `getUpdateError() != HATCH_OK` gives `422 invalid_hatch_boundary`; *(out)* `area, loop_count` |
 | `insert` | `block, position, scale:1\|[sx,sy], angle_deg:0, columns:1, rows:1, spacing:[0,0]` |
 | read-only | `image`, `leader`, `mleader`, `solid`, `parabola`, `hyperbola`, `other`: output only, with `rs_type` and `bbox` |
+
+Implemented output conventions: an `insert`'s `scale` is always `[sx, sy]`; a full ellipse reads `0`/`360`; angles are in [0, 360); a bulge on the last vertex of an open polyline is dropped (no segment follows it); an unknown text `style` that LibreCAD replaces with another font adds a warning, and only a style no font can stand in for is `invalid_entity`; an unknown dimension `style` only adds a warning.
 
 **Ids.**
 - `id` is `lineage()` as a JSON integer.
@@ -797,6 +823,8 @@ qt_add_executable(librecad_remote_api_tests EXCLUDE_FROM_ALL ${MAIN_SOURCES} ${L
 add_test(NAME librecad_remote_api_tests COMMAND $<TARGET_FILE:librecad_remote_api_tests> --reporter compact)
 set_tests_properties(librecad_remote_api_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 300)
 ```
+
+Integrated: the core, server, entities, layers and documents tests all run in this one target (65 test cases). The test-only stand-ins of the core that the entities and documents components used before the core was merged, and the separate documents test target, are gone. `${LIBRECAD_RES}` comes in through `${MAIN_SOURCES}`.
 
 **qmake.** `remote_api.pri` includes `core/core.pri` and wraps the other two in `exists($$PWD/entities/entities.pri) { include(...) }` (same for documents). Each `.pri` does `INCLUDEPATH += $$PWD`, `HEADERS +=`, `SOURCES +=`, and `DEFINES += LC_REMOTE_API_HAS_*`. `remote_api.pri` also adds `DEFINES += LC_MCP_RELEASE=1`. There are no `.ui` files.
 

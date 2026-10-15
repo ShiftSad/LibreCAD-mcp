@@ -185,8 +185,9 @@ a one-line summary.
 |---|---|
 | Prefix and version | Everything is under `/api/v1`. `/status` reports `"api_version": "1.0"`. New fields and routes keep v1; a breaking change would move to `/api/v2`. |
 | Bodies | Request bodies are JSON objects. An empty body counts as `{}`. Answers are JSON (`application/json; charset=utf-8`), except `/render`, which returns `image/png`. |
-| Unknown fields | Refused with `400 unknown_field`, never ignored, so a typo cannot pass silently. |
-| Documents | Routes that work on a drawing take `?doc=<id>`, the `id` from `/documents`. Without it they use the active drawing. Print previews are never documents. |
+| Unknown fields | Refused with `400 unknown_field`, never ignored, so a typo cannot pass silently. The answer names the `field` and, for body fields, lists the accepted ones in `allowed`. Unknown query parameters are refused the same way (`doc` is always accepted). |
+| `null` | A JSON `null` counts as a missing field: an optional field takes its default, a required one gives `400 missing_param`. |
+| Documents | Routes that work on a drawing take `?doc=<id>`, the `id` from `/documents`. Ids start at **0** (`?doc=0` is the first drawing). Without `?doc=` they use the active drawing. Print previews are never documents. |
 | Units | Coordinates are in drawing units; `/drawing` says which (`"units": "mm"`). Lineweights are in mm. |
 | Angles | Always **degrees**, counter-clockwise, in fields that end in `_deg`. |
 | Points | `[x, y]`. A third value is ignored on input. Invalid values come back as `null`. |
@@ -208,14 +209,14 @@ the name `/status` lists in `capabilities` when the build has the route.
 |---|---|---|
 | `GET /status` | status | App and API version, `mcp_build`, platform, capabilities, DWG support, open documents, active document, whether a dialog is open. Answers even while you have a dialog open. |
 | `GET /routes` | routes | Every route with method, path, capability, timeout and summary. |
-| `GET /formats` | documents | File types LibreCAD opens; DXF and DWG versions it saves (`2018` = AutoCAD 2018-2026, also accepted as `2026` or `AC1032`); export formats. |
+| `GET /formats` | documents | File types LibreCAD opens; the DXF and DWG versions it saves, each with a `label` (`"AutoCAD 2018-2026 (AC1032)"`), the default, the `extension` and `aliases` (AutoCAD codes such as `AC1032`, `R2000` spellings, and `2019` to `2026` for `2018`); export formats. |
 | `GET /documents` | documents | Open drawings: id, name, path, modified, active, format and version, entity count. |
-| `POST /documents/new` | documents | New drawing from your default template. `{activate?}` → `201 {document}`. |
+| `POST /documents/new` | documents | New drawing from your default template, not marked modified. `{activate?}` → `201 {document}`. |
 | `POST /documents/open` | documents | `{path, accept_partial?}` → `201 {document, warnings}`, or `200 {document, already_open: true}` when it is open already. DXF, DWG, LFF, CXF, JWW, SHP. |
 | `POST /documents/activate` (doc) | documents | Brings the drawing to the front. |
-| `POST /documents/save` (doc) | documents | Saves in place in the drawing's own format. Never asks for a file name: an unnamed drawing gives `409 document_unnamed`. |
-| `POST /documents/save_as` (doc) | documents | `{path, format: "dxf"\|"dwg", version?, overwrite?}`. The window then shows the new file, as with File > Save As. |
-| `POST /documents/export` (doc) | export | Writes a **copy** as DXF, DWG (any version), PDF, PNG or SVG, and never renames the drawing. PNG/SVG take `width`, `height`, `margin_px`, `background`, `monochrome`; PDF uses the drawing's print settings and `fit_to_page`. |
+| `POST /documents/save` (doc) | documents | Saves in place in the drawing's own format → `{document, path, format, version, label, left_out}`. Never asks for a file name: an unnamed drawing gives `409 document_unnamed`. The folder restrictions apply to the drawing's own file too; a read-only file gives `500 save_failed`. |
+| `POST /documents/save_as` (doc) | documents | `{path, format: "dxf"\|"dwg", version?, overwrite?}` → `{document, path, format, version, label, left_out}`. The window then shows the new file, as with File > Save As. |
+| `POST /documents/export` (doc) | export | Writes a **copy** as DXF, DWG (any version), PDF, PNG or SVG, and never renames the drawing → `{path, format, bytes, left_out}`, plus `version` and `label` for DXF/DWG. PNG/SVG take `width`, `height`, `margin_px`, `background`, `monochrome`; PDF uses the drawing's print settings and `fit_to_page`. The drawing's own file, or one another open drawing uses, gives `409 file_open_in_other_window`. |
 | `POST /documents/close` (doc) | documents | `{discard_changes?}`. A modified drawing gives `409 unsaved_changes` unless `discard_changes` is true. Never asks. |
 
 ### Drawing, view and command line
@@ -223,12 +224,12 @@ the name `/status` lists in `capabilities` when the build has the route.
 | Method and path | Capability | What it does |
 |---|---|---|
 | `GET /drawing` (doc) | drawing | Units, extents, format and DWG/DXF version, counts by entity type, layer and block counts, current layer, undo state, a few header variables. |
-| `GET /render` (doc) | render | PNG of the drawing: `mode=extents\|view\|window`, `min`/`max` for a window, `width`, `height`, `margin_px`, `background`, `monochrome`. Headers `X-LibreCAD-Window` (the rendered area) and `X-LibreCAD-Scale` (pixels per unit). Your view on screen does not move. |
+| `GET /render` (doc) | render | PNG of the drawing: `mode=extents\|view\|window`, `min`/`max` for a window, `width`, `height`, `margin_px`, `background`, `monochrome`. Headers `X-LibreCAD-Window` (the rendered area), `X-LibreCAD-Scale` (pixels per unit) and, for an empty drawing, `X-LibreCAD-Empty: 1`. Your view on screen does not move. |
 | `GET /view` (doc) | view | The window you see: corners, center, size in pixels, pixels per unit. |
-| `POST /view` (doc) | view | Changes your view: `extents`, `window`, `zoom_in`, `zoom_out`, `pan`, `previous`, `named`. Does not edit the drawing. |
+| `POST /view` (doc) | view | Changes your view: `extents`, `window`, `zoom_in`, `zoom_out`, `pan`, `previous`, `named` (model-space views only). A field the action does not use gives `400 bad_param`. Does not edit the drawing. |
 | `POST /undo`, `POST /redo` (doc) | undo | `{steps?}`, like Ctrl+Z and Ctrl+Shift+Z. Layer and block-list changes are not undone (LibreCAD does not record them). |
 | `POST /command` (doc) | command | Types commands and inputs into the command line: `{command: "line", inputs: ["0,0", "100,0", "escape"]}`. Returns the new history lines, the prompt and the active tool. |
-| `GET /commands` | command | Command names `POST /command` accepts (they may be in your LibreCAD language). |
+| `GET /commands` | command | LibreCAD's main command names (they may be in your LibreCAD language), such as `line2p`. The short aliases (`line`, `li`, `l`, ...) work in `POST /command` but are not listed. |
 
 ### Layers and blocks
 
@@ -240,7 +241,7 @@ Layer changes are **not undoable** in LibreCAD; the answers say `"undoable": fal
 | `POST /layers` (doc) | layers | `{name, color?, linetype?, lineweight?, frozen?, locked?, printable?, construction?, make_current?}` → `201`. An existing name gives `409 layer_exists`. |
 | `PATCH /layers/{name}` (doc) | layers | Rename, restyle, freeze or lock. Layer "0" cannot be renamed. |
 | `POST /layers/{name}/current` (doc) | layers | Makes the layer current. |
-| `DELETE /layers/{name}` (doc) | layers | `?entities=refuse\|delete\|move&move_to=0`. By default a layer that still has entities is refused (`409 layer_not_empty`). |
+| `DELETE /layers/{name}` (doc) | layers | `?entities=refuse\|delete\|move&move_to=0` → `{deleted: name, entities_deleted, entities_moved, undoable: false}`. By default a layer that still has entities is refused (`409 layer_not_empty`). A locked layer that still has entities, or a locked `move_to` layer, gives `409 layer_locked`. |
 | `GET /blocks` (doc) | blocks | Block definitions with base point, entity count and number of inserts. |
 | `POST /blocks/{name}/insert` (doc) | blocks | `{position, scale?, angle_deg?, layer?, columns?, rows?, spacing?}` → `201 {entity}`. |
 
@@ -252,10 +253,10 @@ Each request that changes entities is **one undo step**.
 |---|---|---|
 | `GET /entities` (doc) | entities | Filters `type`, `layer`, `bbox=x1,y1,x2,y2` with `bbox_mode=crossing\|window`, `selected`, `include_hidden`; paging `limit` (up to 1000) and `offset`; `detail=summary\|full`. Returns `{entities, total, offset, limit, next_offset}`. |
 | `GET /entities/{id}` (doc) | entities | One entity in full detail. |
-| `POST /entities` (doc) | entities | `{entities: [spec, ...], layer?, select?}`, 1 to 5000 specs. **All or nothing**: if one spec is wrong, nothing is created. Returns `201 {created, ids, undoable: true}`. |
+| `POST /entities` (doc) | entities | `{entities: [spec, ...], layer?, select?}`, 1 to 5000 specs. **All or nothing**: if one spec is wrong, nothing is created and one `422 invalid_entity` lists every bad field in `errors` (and the accepted values in `allowed` where there is a list); an `insert` of an unknown block gives `404 unknown_block`. Returns `201 {created, ids, undoable: true}`. |
 | `PATCH /entities/{id}` (doc) | entities | Changes attributes or geometry fields of one entity; the id stays. |
 | `DELETE /entities/{id}`, `POST /entities/delete {ids}` (doc) | entities | Deletes; if one id is unknown or locked, nothing is deleted. |
-| `POST /entities/transform` (doc) | transform | `move` (`offset`), `rotate` (`center`, `angle_deg`), `scale` (`base`, `factor`), `mirror` (`axis`); `copy` and `copies` make copies with new ids. |
+| `POST /entities/transform` (doc) | transform | `move` (`offset`), `rotate` (`center`, `angle_deg`), `scale` (`base`, `factor`), `mirror` (`axis`); `copy` and `copies` make copies with new ids. If one entity cannot be transformed (a block reference LibreCAD cannot edit), nothing changes: `422 invalid_entity` with `errors` by id. |
 | `GET /selection`, `POST /selection` (doc) | selection | Reads or changes the selection you see: `set`, `add`, `remove`, `clear`, `all`, by ids, area, type or layer. |
 | `POST /measure` (doc) | measure | `distance`, `length`, `area` (with perimeter), `angle`, `intersections`, from points or entity ids. Read-only. |
 
@@ -274,7 +275,7 @@ read-only values such as `length` or `area`.
 | `point` | `position` |
 | `polyline` | `vertices: [[x, y] or [x, y, bulge], ...]` (at least 2), `closed: false` |
 | `spline` | either `control_points` with `degree: 3` (1 to 3), or `fit_points`; `closed: false` |
-| `text` | `position`, `text`, `height` > 0, `angle_deg: 0`, `halign`, `valign`, `style: "standard"`, `width_factor: 1` |
+| `text` | `position`, `text`, `height` > 0, `angle_deg: 0`, `halign`, `valign`, `style: "standard"`, `width_factor: 1`; `second_point` (the end of the baseline) is required when `halign` is `aligned` or `fit` |
 | `mtext` | `position`, `text`, `height` > 0, `width: 0`, `angle_deg: 0`, `attachment`, `line_spacing: 1`, `style` |
 | `dimension` | `dim_type`: `linear` (`p1`, `p2`, `line_point`, `angle_deg`), `aligned`, `radial`, `diametric` or `angular`; `text` (empty = measured value) |
 | `hatch` | `pattern: "SOLID"`, `scale: 1`, `angle_deg: 0`, and `boundary` (point loops) or `boundary_ids` (closed entities) |
@@ -283,8 +284,13 @@ read-only values such as `length` or `area`.
 Any spec may also set `layer`, `color` (`"ByLayer"`, `"ByBlock"`, `"#rrggbb"`, or an ACI number
 1 to 255), `linetype` (`"ByLayer"`, `"Continuous"`, `"Dashed"`, ...) and `lineweight` (`"ByLayer"`,
 `"ByBlock"`, `"Default"`, or mm such as `0.25`). Without them the entity takes its layer's
-properties. Images, leaders, multileaders, solids, parabolas and hyperbolas are listed read-only.
-The complete table is in [DESIGN.md section 2.6](DESIGN.md#26-entity-specs-and-ids).
+properties. Lineweights must be one of the standard widths (0.25, 0.35, 0.5, ...); any other value
+is refused and the answer lists the accepted ones. Images, leaders, multileaders, solids,
+parabolas and hyperbolas are listed read-only. The complete table is in
+[DESIGN.md section 2.6](DESIGN.md#26-entity-specs-and-ids).
+
+Read back, an `insert`'s `scale` is always `[sx, sy]`, a full ellipse has angles 0 and 360, and
+angles are in [0, 360).
 
 ## 9. Errors
 
@@ -299,6 +305,19 @@ context (`param`, `allowed`, `path`, `ids`, `name`, `errors`). A bare `404 not_f
 **the route does not exist** in this build; a missing drawing, entity, layer or file has its own
 token.
 
+`422 invalid_entity` maps each bad field to the reason, and, where LibreCAD has a list of accepted
+values, maps the field to that list:
+
+```json
+{"error": "invalid_entity", "detail": "1 of 2 entity specs are invalid; nothing was created",
+ "errors": {"entities[1].lineweight": "not a standard lineweight; ..."},
+ "allowed": {"entities[1].lineweight": ["ByLayer", "ByBlock", "Default", 0, 0.05, ...]}}
+```
+
+`ambiguous_id` (409) means two entities share one id, which happens when a block reference is
+copied in LibreCAD without a new identity; find them by area or layer instead. `too_many` (422)
+means more than 5000 entities or ids in one request.
+
 | HTTP | Tokens |
 |---|---|
 | 400 | `bad_request`, `invalid_json`, `body_must_be_object`, `unknown_field`, `missing_param`, `bad_param`, `bad_path` |
@@ -308,7 +327,7 @@ token.
 | 405 | `method_not_allowed` (with `allowed`) |
 | 408, 411, 413, 421, 431 | `request_timeout`, `length_required`, `body_too_large`, `bad_host`, `headers_too_large` |
 | 409 | `no_document`, `gui_modal_open`, `unsaved_changes`, `file_exists`, `file_open_in_other_window`, `document_unnamed`, `cannot_save_in_place`, `partial_import`, `layer_exists`, `layer_not_empty`, `layer_locked`, `layer_frozen`, `entity_locked`, `ambiguous_id` |
-| 422 | `invalid_entity` (with `errors`, for example `{"entities[2].radius": "must be > 0"}`), `unsupported_format`, `extension_mismatch`, `import_failed`, `invalid_hatch_boundary`, `not_closed`, `cannot_rename_layer_0`, `cannot_delete_layer_0`, `too_many` |
+| 422 | `invalid_entity` (with `errors`, for example `{"entities[2].radius": "must be > 0"}`, and `allowed`), `unsupported_format`, `extension_mismatch`, `import_failed`, `invalid_hatch_boundary`, `not_closed`, `cannot_rename_layer_0`, `cannot_delete_layer_0`, `too_many`, `bad_param` (an unknown save or export `version`, with `allowed`) |
 | 500 | `internal`, `save_failed`, `export_failed` |
 | 501 | `dwg_unsupported` (a build without DWG support) |
 | 503 | `shutting_down` |
@@ -324,9 +343,13 @@ up (for example from a typed command) is closed at once, and the answer lists it
 "skipped_dialogs": [{"class": "QMessageBox", "title": "...", "text": "..."}]
 ```
 
+A PNG from `/render` cannot carry that field, so it lists closed dialogs in the
+`X-LibreCAD-Skipped-Dialogs` header instead.
+
 **Your dialogs come first.** If you have a dialog open in LibreCAD (Preferences, a file dialog, a
-message), requests do not wait for it: they answer `409 gui_modal_open` with the window title.
-Close it and the client can go on. `/status` still answers and says `"modal_open": true`.
+message), requests do not wait for it: every route, read-only ones included, answers
+`409 gui_modal_open` with the window title. Close it and the client can go on. `/status` still
+answers and says `"modal_open": true` and `"modal_window": "<title>"`.
 
 **Your tool is cancelled.** A request that changes a drawing first cancels the tool you were using
 (for example a half-drawn line), and the answer says which in `cancelled_action`. `/command` is
@@ -349,7 +372,7 @@ repeating it. Autosave waits while a request is running.
 | body | 4 MiB | `413 body_too_large` |
 | `Transfer-Encoding: chunked` | refused | `411 length_required` |
 | reading the request | 15 s | `408 request_timeout` |
-| entities per `POST /entities` | 5000 | `422 too_many` |
+| entities per `POST /entities`, ids per request | 5000 | `422 too_many` |
 | `GET /entities` page | 1000 | |
 | render size | 64 to 4096 pixels per side | |
 | copies per transform | 1 to 100 | |
@@ -420,7 +443,7 @@ computers.
 | `504 ui_timeout` | LibreCAD was busy. Check with `/documents` or `/entities` whether the change happened before repeating it. |
 | `403 path_not_allowed` | The path is outside the folders allowed in the Remote API tab (or in `LIBRECAD_MCP_ALLOWED_ROOTS`), or it is a network path. |
 | `403 commands_disabled` | Turn on "Allow running command-line commands". |
-| `422 invalid_entity` on text | The text style needs LibreCAD's fonts; check Options > Application Preferences > Paths. |
+| `422 invalid_entity` on text | `aligned` and `fit` text need `second_point`. If the error names `style`, LibreCAD found no font at all; check Options > Application Preferences > Paths (an unknown style name alone only adds a warning: LibreCAD uses another font). |
 | `404 not_found` on a route the docs list | The LibreCAD build is older than the MCP server; compare `capabilities` in `/status`. |
 
 The end-to-end test in [`tools/remote-api/`](../../tools/remote-api/README.md) exercises every
