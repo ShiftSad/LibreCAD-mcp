@@ -59,7 +59,7 @@
 
 namespace {
 constexpr int PollSliceMs = 50;       // how often the readers look at the stop flag
-constexpr int AcceptSliceMs = 200;
+constexpr int AcceptSliceMs = 200;    // how often the accepting thread looks at the stop flag
 constexpr int DrainSliceMs = 20;      // the accept loop's slice while refused connections drain
 constexpr int BindWaitMs = 2000;
 constexpr int StopWaitMs = 2000;
@@ -70,10 +70,12 @@ constexpr int StopFlushMs = 300;      // writing the last response while stoppin
 constexpr int WatchSliceMs = 20;      // looking at the client while its request waits
 constexpr qint64 ReadChunk = 64 * 1024;
 
-// Sent once to an HTTP/1.1 client that ends its sending while its request
-// waits: a client that closed its socket answers it with a reset (it is gone),
-// one that only half-closed reads it before the final answer (RFC 9110 15.2).
-const char InterimContinue[] = "HTTP/1.1 100 Continue\r\n\r\n";
+// Sent to an HTTP/1.1 client that ends its sending while its request waits,
+// and again every interimRepeatMs: a client that closed its socket answers it
+// with a reset (it is gone), one that only half-closed reads it before the
+// final answer (RFC 9110 15.2: a client takes any number of 1xx answers). One
+// that closes only later, after reading the first one, answers the next.
+const QByteArray InterimContinue = QByteArrayLiteral("HTTP/1.1 100 Continue\r\n\r\n");
 
 // ---- the native socket of a connection --------------------------------------
 namespace net {
@@ -152,6 +154,57 @@ qint64 read(const qintptr descriptor, char* buffer, const qint64 max) {
 #endif
 }
 
+// What waits to be read, without taking it: > 0 bytes are there; 0 the client
+// ended its sending; -1 nothing yet; -2 the connection failed.
+qint64 peek(const qintptr descriptor) {
+    char byte = 0;
+#ifdef _WIN32
+    const int n = ::recv(native(descriptor), &byte, 1, MSG_PEEK);
+    if (n >= 0) {
+        return n;
+    }
+    return wouldBlock() ? -1 : -2;
+#else
+    for (;;) {
+        const ssize_t n = ::recv(native(descriptor), &byte, 1, MSG_PEEK);
+        if (n >= 0) {
+            return n;
+        }
+        if (errno != EINTR) {
+            return wouldBlock() ? -1 : -2;
+        }
+    }
+#endif
+}
+
+#ifdef _WIN32
+using PollEntry = WSAPOLLFD;
+#else
+using PollEntry = pollfd;
+#endif
+
+PollEntry pollEntry(const qintptr descriptor) {
+    PollEntry entry{};
+    entry.fd = native(descriptor);
+    entry.events = POLLIN;
+    return entry;
+}
+
+// Waits up to ms until one of the sockets can be read (or accepts a
+// connection, or failed); the result is in each entry's revents. < 0 on an error.
+int poll(std::vector<PollEntry>& entries, const int ms) {
+#ifdef _WIN32
+    return WSAPoll(entries.data(), static_cast<ULONG>(entries.size()), ms);
+#else
+    for (;;) {
+        const int n = ::poll(entries.data(), static_cast<nfds_t>(entries.size()), ms);
+        if (n >= 0 || errno != EINTR) {
+            return n;
+        }
+    }
+#endif
+}
+
 // Sends what the socket takes now: >= 0 bytes sent; -1 none now; -2 the connection failed.
 qint64 send(const qintptr descriptor, const char* data, const qint64 size) {
     const int chunk = static_cast<int>(qMin<qint64>(size, INT_MAX));
@@ -205,13 +258,12 @@ void abort(const qintptr descriptor) {
 }
 } // namespace net
 
-// A reader's connection: reset when it goes out of scope, unless it was closed
-// or handed on.
+// A reader's connection (already non-blocking): reset when it goes out of
+// scope, unless it was closed or handed on.
 class Connection {
 public:
     explicit Connection(const qintptr descriptor)
         : m_descriptor(descriptor) {
-        net::prepare(descriptor);
     }
     ~Connection() {
         if (m_open) {
@@ -256,16 +308,46 @@ private:
     QList<qintptr> m_pending;
 };
 
-// The client's own deadline (X-Request-Timeout-Ms), counted from now; an absent
-// or malformed value means none.
-QDeadlineTimer clientDeadline(const LC_ApiRequest& request) {
-    const QByteArray value = request.headers.value(QByteArrayLiteral("x-request-timeout-ms")).trimmed();
-    bool ok = false;
-    const qint64 ms = value.toLongLong(&ok);
-    if (!ok || ms <= 0) {
+// The client's own deadline (X-Request-Timeout-Ms), counted from now: none
+// when the header is absent; nullopt when it is not one whole number of
+// milliseconds from 1 to MaxClientTimeoutMs (a repeated header arrives joined
+// as "700, 700" and is refused too). A client that believes it capped its wait
+// must not wait without bound.
+std::optional<QDeadlineTimer> parseClientDeadline(const LC_ApiRequest& request) {
+    const auto header = request.headers.constFind(QByteArrayLiteral("x-request-timeout-ms"));
+    if (header == request.headers.cend()) {
         return QDeadlineTimer(QDeadlineTimer::Forever);
     }
-    return QDeadlineTimer(qMin(ms, LC_RemoteApiServer::MaxClientTimeoutMs));
+    const QByteArray value = header.value().trimmed(); // the optional whitespace around a field value
+    if (value.isEmpty() || value.size() > 9) {
+        return std::nullopt;
+    }
+    qint64 ms = 0;
+    for (const char c : value) {
+        if (c < '0' || c > '9') {
+            return std::nullopt; // no sign, fraction, exponent or hex
+        }
+        ms = ms * 10 + (c - '0');
+    }
+    if (ms < 1 || ms > LC_RemoteApiServer::MaxClientTimeoutMs) {
+        return std::nullopt;
+    }
+    return QDeadlineTimer(ms);
+}
+
+LC_ApiResponse badDeadlineHeader(const LC_ApiRequest& request) {
+    QByteArray shown = request.headers.value(QByteArrayLiteral("x-request-timeout-ms"));
+    if (shown.size() > 40) {
+        shown = shown.left(40) + "...";
+    }
+    return LC_ApiError(400, QStringLiteral("bad_header"),
+                       QStringLiteral("X-Request-Timeout-Ms must be one whole number of milliseconds from 1 to %1, not '%2'")
+                           .arg(LC_RemoteApiServer::MaxClientTimeoutMs)
+                           .arg(QString::fromLatin1(shown)),
+                       {{QStringLiteral("header"), QStringLiteral("X-Request-Timeout-Ms")},
+                        {QStringLiteral("min"), 1},
+                        {QStringLiteral("max"), LC_RemoteApiServer::MaxClientTimeoutMs}})
+        .toResponse();
 }
 
 LC_ApiResponse shuttingDown() {
@@ -275,6 +357,19 @@ LC_ApiResponse shuttingDown() {
 LC_ApiResponse serverBusy() {
     return LC_ApiError(503, QStringLiteral("server_busy"), QStringLiteral("too many connections to the Remote API at once"),
                        {{QStringLiteral("hint"), QStringLiteral("retry in a moment")}})
+        .toResponse();
+}
+
+LC_ApiResponse headersTooSlow(const int timeoutMs) {
+    return LC_ApiError(408, QStringLiteral("request_timeout"),
+                       QStringLiteral("the request headers were not received within %1 s").arg(timeoutMs / 1000.0))
+        .toResponse();
+}
+
+LC_ApiResponse evicted() {
+    return LC_ApiError(408, QStringLiteral("request_timeout"),
+                       QStringLiteral("the request headers had not arrived when the Remote API needed this connection "
+                                      "for another client"))
         .toResponse();
 }
 
@@ -317,15 +412,13 @@ struct LC_RemoteApiServer::Job {
     }
 };
 
-// What a reader thread is doing, as the accepting thread sees it.
-struct LC_RemoteApiServer::ReaderSlot {
-    enum Phase : int {
-        Headers,   // its request headers have not all arrived
-        Request,   // past its headers and the token: reading, queued, running or answering
-        Evicted,   // closed by the accepting thread to make room
-        Finished
-    };
-    std::atomic<int> phase{Headers};
+// A connection whose request headers have not all arrived: the accepting
+// thread reads it.
+struct LC_RemoteApiServer::Incoming {
+    qintptr descriptor = 0;
+    std::shared_ptr<LC_HttpRequestParser> parser;
+    QDeadlineTimer headerDeadline;
+    QDeadlineTimer readDeadline;   // the whole request, from the connection
 };
 
 LC_RemoteApiServer::LC_RemoteApiServer(const LC_RemoteApiRouter& router, LC_RemoteApiContext& context)
@@ -417,39 +510,32 @@ void LC_RemoteApiServer::run() {
     dispatcher->start();
     m_bindPromise->set_value(BindOutcome{StartResult::Listening, {}});
 
-    struct Reader {
-        std::unique_ptr<QThread> thread;
-        std::shared_ptr<ReaderSlot> slot;
-    };
-    std::list<Reader> readers;
-    const int maxConnections = qMax(1, m_limits.maxConnections);
-    const auto reap = [&readers] {
-        readers.remove_if([](const Reader& reader) {
-            return reader.thread->isFinished();
-        });
-    };
-    // Whether a new connection may have a reader. When every reader is busy,
-    // the one that has waited longest for its request headers gives way (idle
-    // connections cannot lock the real client out); when every one is past its
-    // headers, nobody does. Evicted readers end within a poll slice; until then
-    // they count against twice the limit.
-    const auto makeRoom = [&readers, maxConnections] {
-        if (static_cast<int>(readers.size()) >= 2 * maxConnections) {
-            return false;
-        }
-        int serving = 0;
-        for (const Reader& reader : readers) {
-            const int phase = reader.slot->phase.load();
-            serving += phase == ReaderSlot::Headers || phase == ReaderSlot::Request ? 1 : 0;
-        }
-        if (serving < maxConnections) {
-            return true;
-        }
-        for (Reader& reader : readers) {   // oldest first
-            int expected = ReaderSlot::Headers;
-            if (reader.slot->phase.compare_exchange_strong(expected, ReaderSlot::Evicted)) {
-                return true;
+    // This thread reads every connection until its headers are in: a connection
+    // that sends nothing, or sends slowly, holds no thread, and a request past
+    // its headers (it has the token) never gives way to one. When maxIncoming
+    // connections are still sending their headers, the oldest of them that has
+    // nothing waiting to be read is closed (408) for a new one.
+    Readers readers;
+    std::list<Incoming> incoming; // in the order they arrived
+    const std::size_t maxIncoming = static_cast<std::size_t>(qMax(1, m_limits.maxIncoming));
+    const int headerTimeoutMs = qMin(m_limits.headerTimeoutMs, m_limits.readTimeoutMs);
+    const qintptr listener = server.socketDescriptor();
+    QByteArray buffer(ReadChunk, Qt::Uninitialized);
+    std::vector<net::PollEntry> polled;
+    const auto makeRoom = [this, &incoming] {
+        for (auto it = incoming.begin(); it != incoming.end(); ++it) { // oldest first
+            const qint64 waiting = net::peek(it->descriptor);
+            if (waiting > 0) {
+                continue; // its bytes are here: they are read on the next pass
             }
+            if (waiting == -1) {
+                refuseConnection(it->descriptor, evicted());
+            }
+            else {
+                net::abort(it->descriptor); // it closed or failed
+            }
+            incoming.erase(it);
+            return true;
         }
         return false;
     };
@@ -459,39 +545,71 @@ void LC_RemoteApiServer::run() {
             const std::lock_guard<std::mutex> lock(m_drainMutex);
             draining = !m_draining.empty();
         }
-        bool timedOut = false;
-        if (!server.waitForNewConnection(draining ? DrainSliceMs : AcceptSliceMs, &timedOut) && !timedOut) {
-            msleep(PollSliceMs); // a socket error: do not spin
+        qint64 waitMs = draining ? DrainSliceMs : AcceptSliceMs;
+        polled.clear();
+        polled.push_back(net::pollEntry(listener));
+        for (const Incoming& connection : incoming) {
+            polled.push_back(net::pollEntry(connection.descriptor));
+            waitMs = qMin(waitMs, qMax<qint64>(0, connection.headerDeadline.remainingTime()));
         }
-        reap();
+        if (net::poll(polled, static_cast<int>(waitMs)) < 0) {
+            msleep(PollSliceMs); // a socket error: do not spin, and look at every connection
+            for (net::PollEntry& entry : polled) {
+                entry.revents = POLLIN;
+            }
+        }
+        readers.remove_if([](const std::unique_ptr<QThread>& reader) {
+            return reader->isFinished();
+        });
+
+        // what the connections still sending their headers sent (polled in this order)
+        std::size_t index = 1;
+        for (auto it = incoming.begin(); it != incoming.end(); ++index) {
+            bool left = false;
+            if (polled.at(index).revents != 0) {
+                left = readIncoming(*it, buffer, readers);
+            }
+            if (!left && it->headerDeadline.hasExpired()) {
+                refuseConnection(it->descriptor, headersTooSlow(headerTimeoutMs));
+                left = true;
+            }
+            it = left ? incoming.erase(it) : std::next(it);
+        }
+
+        bool timedOut = false;
+        server.waitForNewConnection(0, &timedOut);
         for (const qintptr descriptor : server.takePending()) {
+            net::prepare(descriptor);
             if (m_stop.load()) {
                 refuseConnection(descriptor, shuttingDown());
                 continue;
             }
-            if (!makeRoom()) {
+            if (incoming.size() >= maxIncoming && !makeRoom()) {
                 refuseConnection(descriptor, serverBusy());
                 continue;
             }
-            auto slot = std::make_shared<ReaderSlot>();
-            std::unique_ptr<QThread> thread(QThread::create([this, descriptor, slot] { serveConnection(descriptor, slot); }));
-            thread->setObjectName(QStringLiteral("remote-api-connection"));
-            thread->start();
-            readers.push_back({std::move(thread), std::move(slot)});
+            incoming.push_back({descriptor,
+                                std::make_shared<LC_HttpRequestParser>(m_limits.maxHeaderBytes, m_limits.maxBodyBytes),
+                                QDeadlineTimer(headerTimeoutMs), QDeadlineTimer(m_limits.readTimeoutMs)});
         }
         serviceDraining(false);
     }
     m_listening = false;
     server.close();
     for (const qintptr descriptor : server.takePending()) {
+        net::prepare(descriptor);
         refuseConnection(descriptor, shuttingDown());
     }
+    for (const Incoming& connection : incoming) {
+        net::abort(connection.descriptor); // no request yet: reset
+    }
+    incoming.clear();
     // The dispatcher answers what is still queued (503) before it ends; the
     // readers write those answers and end too.
     m_queueChanged.notify_all();
     dispatcher->wait();
-    for (const Reader& reader : readers) {
-        reader.thread->wait();
+    for (const std::unique_ptr<QThread>& reader : readers) {
+        reader->wait();
     }
     // the last refusals: read briefly what their clients still send, then close
     const QDeadlineTimer flush(StopFlushMs);
@@ -511,9 +629,64 @@ void LC_RemoteApiServer::run() {
     serviceDraining(true);
 }
 
+bool LC_RemoteApiServer::readIncoming(Incoming& incoming, QByteArray& buffer, Readers& readers) {
+    LC_HttpRequestParser& parser = *incoming.parser;
+    for (;;) {
+        const qint64 n = net::read(incoming.descriptor, buffer.data(), buffer.size());
+        if (n > 0) {
+            parser.feed(QByteArrayView(buffer.constData(), n));
+            if (parser.headersComplete() || parser.state() != LC_HttpRequestParser::State::Incomplete) {
+                break; // the body is the reader's
+            }
+            continue;
+        }
+        if (n == 0) { // the client ended its sending
+            if (parser.isEmpty()) {
+                net::close(incoming.descriptor); // opened and closed without a request
+                return true;
+            }
+            parser.finish();
+            break;
+        }
+        if (n == -2) {
+            net::abort(incoming.descriptor); // the connection failed
+            return true;
+        }
+        return false; // nothing more yet
+    }
+    if (parser.state() == LC_HttpRequestParser::State::Error) {
+        refuseConnection(incoming.descriptor, parser.error().toResponse());
+        return true;
+    }
+    if (!parser.headersComplete()) {
+        return false;
+    }
+    admit(incoming, readers);
+    return true;
+}
+
+void LC_RemoteApiServer::admit(Incoming& incoming, Readers& readers) {
+    // before the body: a client without the token never gets to send it
+    QDeadlineTimer deadline(QDeadlineTimer::Forever);
+    if (const std::optional<LC_ApiResponse> refused = refusal(incoming.parser->request(), &deadline)) {
+        refuseConnection(incoming.descriptor, *refused);
+        return;
+    }
+    if (static_cast<int>(readers.size()) >= qMax(1, m_limits.maxConnections)) {
+        refuseConnection(incoming.descriptor, serverBusy());
+        return;
+    }
+    std::unique_ptr<QThread> thread(QThread::create(
+        [this, descriptor = incoming.descriptor, parser = incoming.parser, readDeadline = incoming.readDeadline, deadline] {
+            serveConnection(descriptor, parser, readDeadline, deadline);
+        }));
+    thread->setObjectName(QStringLiteral("remote-api-connection"));
+    thread->start();
+    readers.push_back(std::move(thread));
+}
+
 void LC_RemoteApiServer::refuseConnection(const qintptr descriptor, const LC_ApiResponse& response) {
-    net::prepare(descriptor);
-    // one try: the answer is small and the new socket's buffer is empty; the
+    // one try: the answer is small and nothing else was sent on the socket; the
     // accepting thread never waits for a client
     const QByteArray data = LC_RemoteApiHttp::serializeResponse(response);
     net::send(descriptor, data.constData(), data.size());
@@ -627,97 +800,57 @@ void LC_RemoteApiServer::dispatchLoop() {
     }
 }
 
-void LC_RemoteApiServer::serveConnection(const qintptr descriptor, const std::shared_ptr<ReaderSlot>& slot) {
-    struct Finish {
-        ReaderSlot& slot;
-        ~Finish() { slot.phase = ReaderSlot::Finished; }
-    } finish{*slot};
+void LC_RemoteApiServer::serveConnection(const qintptr descriptor, const std::shared_ptr<LC_HttpRequestParser>& parser,
+                                         const QDeadlineTimer readDeadline, const QDeadlineTimer clientDeadline) {
     Connection connection(descriptor);
-    LC_HttpRequestParser parser(m_limits.maxHeaderBytes, m_limits.maxBodyBytes);
-    const int headerTimeoutMs = qMin(m_limits.headerTimeoutMs, m_limits.readTimeoutMs);
-    const QDeadlineTimer headerDeadline(headerTimeoutMs);
-    const QDeadlineTimer readDeadline(m_limits.readTimeoutMs);
     QByteArray buffer(ReadChunk, Qt::Uninitialized);
     bool timedOut = false;
-    bool evicted = false;
-    bool checked = false; // Host, Origin and the token
-    while (parser.state() == LC_HttpRequestParser::State::Incomplete) {
+    while (parser->state() == LC_HttpRequestParser::State::Incomplete) { // the body
         if (m_stop.load()) {
             return; // reset
         }
-        if (slot->phase.load() == ReaderSlot::Evicted) {
-            evicted = true;
-            break;
-        }
         const qint64 n = net::read(descriptor, buffer.data(), buffer.size());
         if (n > 0) {
-            parser.feed(QByteArrayView(buffer.constData(), n));
-            if (!checked && parser.headersComplete() && parser.state() != LC_HttpRequestParser::State::Error) {
-                // before the body: a client without the token never gets to send it
-                checked = true;
-                if (const std::optional<LC_ApiResponse> refused = refusal(parser.request())) {
-                    refuseAndDrain(connection.release(), *refused);
-                    return;
-                }
-                int expected = ReaderSlot::Headers;
-                if (!slot->phase.compare_exchange_strong(expected, ReaderSlot::Request)) {
-                    evicted = true;
-                    break;
-                }
-            }
+            parser->feed(QByteArrayView(buffer.constData(), n));
             continue;
         }
         if (n == 0) { // the client ended its sending
-            if (parser.isEmpty()) {
-                connection.close(); // opened and closed without a request
-                return;
-            }
-            parser.finish();
+            parser->finish();
             break;
         }
         if (n == -2) {
             return; // the connection failed
         }
-        const QDeadlineTimer& deadline = parser.headersComplete() ? readDeadline : headerDeadline;
-        if (deadline.hasExpired()) {
+        if (readDeadline.hasExpired()) {
             timedOut = true;
             break;
         }
-        net::waitFor(descriptor, false, static_cast<int>(qMin<qint64>(PollSliceMs, qMax<qint64>(1, deadline.remainingTime()))));
+        net::waitFor(descriptor, false, static_cast<int>(qMin<qint64>(PollSliceMs, qMax<qint64>(1, readDeadline.remainingTime()))));
     }
-
-    if (evicted) {
-        refuseAndDrain(connection.release(),
-                       LC_ApiError(408, QStringLiteral("request_timeout"),
-                                   QStringLiteral("the request headers had not arrived when the Remote API needed "
-                                                  "this connection for another client"))
-                           .toResponse());
-        return;
-    }
-    if (timedOut || parser.state() == LC_HttpRequestParser::State::Error) {
+    if (timedOut || parser->state() == LC_HttpRequestParser::State::Error) {
         const LC_ApiResponse refused =
             timedOut ? LC_ApiError(408, QStringLiteral("request_timeout"),
-                                   parser.headersComplete()
-                                       ? QStringLiteral("the request was not received within %1 s").arg(m_limits.readTimeoutMs / 1000.0)
-                                       : QStringLiteral("the request headers were not received within %1 s").arg(headerTimeoutMs / 1000.0))
+                                   QStringLiteral("the request was not received within %1 s").arg(m_limits.readTimeoutMs / 1000.0))
                            .toResponse()
-                     : parser.error().toResponse();
+                     : parser->error().toResponse();
         refuseAndDrain(connection.release(), refused);
         return;
     }
 
-    const bool http10 = parser.isHttp10();
+    const bool http10 = parser->isHttp10();
     auto job = std::make_shared<Job>();
-    job->request = parser.takeRequest();
-    job->clientDeadline = clientDeadline(job->request);
+    job->request = parser->takeRequest();
+    job->clientDeadline = clientDeadline;
     std::future<LC_ApiResponse> answer = job->promise.get_future();
     LC_ApiResponse response;
+    QByteArray interim; // what is left to send of an interim answer
     if (!enqueue(job)) {
         response = shuttingDown();
     }
     else {
         // Watch the client while the request waits or runs (see the class comment).
         bool ended = false; // the client ended its sending
+        QDeadlineTimer nextInterim(QDeadlineTimer::Forever);
         QDeadlineTimer stopping(QDeadlineTimer::Forever);
         for (;;) {
             if (answer.wait_for(std::chrono::milliseconds(WatchSliceMs)) == std::future_status::ready) {
@@ -729,9 +862,22 @@ void LC_RemoteApiServer::serveConnection(const qintptr descriptor, const std::sh
             bool gone = n == -2;
             if (n == 0 && !ended) {
                 ended = true;
-                if (!http10 && net::send(descriptor, InterimContinue, sizeof(InterimContinue) - 1) == -2) {
+                if (!http10) {
+                    nextInterim = QDeadlineTimer(0);
+                }
+            }
+            if (!gone && nextInterim.hasExpired()) {
+                if (interim.isEmpty()) {
+                    interim = InterimContinue;
+                }
+                const qint64 sent = net::send(descriptor, interim.constData(), interim.size());
+                if (sent == -2) {
                     gone = true;
                 }
+                else if (sent > 0) {
+                    interim.remove(0, sent);
+                }
+                nextInterim = QDeadlineTimer(qMax(1, m_limits.interimRepeatMs));
             }
             if (gone) {
                 job->clientGone = true;
@@ -755,7 +901,8 @@ void LC_RemoteApiServer::serveConnection(const qintptr descriptor, const std::sh
         }
     }
 
-    if (!writeAll(descriptor, LC_RemoteApiHttp::serializeResponse(response))) {
+    // an interim answer cut short is completed first
+    if (!writeAll(descriptor, interim + LC_RemoteApiHttp::serializeResponse(response))) {
         return; // reset
     }
     net::shutdownSending(descriptor);
@@ -797,7 +944,7 @@ bool LC_RemoteApiServer::hostAllowed(const QByteArray& host) const {
     return value == "127.0.0.1:" + port || value == "localhost:" + port || value == "[::1]:" + port;
 }
 
-std::optional<LC_ApiResponse> LC_RemoteApiServer::refusal(const LC_ApiRequest& request) const {
+std::optional<LC_ApiResponse> LC_RemoteApiServer::refusal(const LC_ApiRequest& request, QDeadlineTimer* clientDeadline) const {
     if (!hostAllowed(request.headers.value(QByteArrayLiteral("host")))) {
         return LC_ApiError(421, QStringLiteral("bad_host"),
                            QStringLiteral("the Host header must be 127.0.0.1:%1 or localhost:%1").arg(m_port.load()))
@@ -826,6 +973,13 @@ std::optional<LC_ApiResponse> LC_RemoteApiServer::refusal(const LC_ApiRequest& r
                 .toResponse();
         response.extraHeaders.append({QByteArrayLiteral("WWW-Authenticate"), QByteArrayLiteral("Bearer realm=\"LibreCAD\"")});
         return response;
+    }
+    const std::optional<QDeadlineTimer> deadline = parseClientDeadline(request);
+    if (!deadline.has_value()) {
+        return badDeadlineHeader(request);
+    }
+    if (clientDeadline != nullptr) {
+        *clientDeadline = *deadline;
     }
     return std::nullopt;
 }

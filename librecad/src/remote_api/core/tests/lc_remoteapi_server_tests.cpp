@@ -36,7 +36,11 @@
 #pragma comment(lib, "ws2_32.lib")
 #endif
 #else
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
 #endif
 
 #include <algorithm>
@@ -95,6 +99,84 @@ void halfClose(QTcpSocket& socket) {
     ::shutdown(static_cast<SOCKET>(socket.socketDescriptor()), SD_SEND);
 #else
     ::shutdown(static_cast<int>(socket.socketDescriptor()), SHUT_WR);
+#endif
+}
+
+// A plain blocking client socket, for floods and for closing exactly when a test says.
+#ifdef _WIN32
+using NativeSocket = SOCKET;
+const NativeSocket NoSocket = INVALID_SOCKET;
+void closeNative(const NativeSocket s) {
+    ::closesocket(s);
+}
+#else
+using NativeSocket = int;
+const NativeSocket NoSocket = -1;
+void closeNative(const NativeSocket s) {
+    ::close(s);
+}
+#endif
+
+NativeSocket connectNative(const quint16 port, const int receiveTimeoutMs = 5000) {
+#ifdef _WIN32
+    static const bool started = [] {
+        WSADATA data;
+        return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    }();
+    (void)started;
+#endif
+    const NativeSocket s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == NoSocket) {
+        return NoSocket;
+    }
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::connect(s, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+        closeNative(s);
+        return NoSocket;
+    }
+#ifdef _WIN32
+    const DWORD timeout = static_cast<DWORD>(receiveTimeoutMs);
+#else
+    timeval timeout{receiveTimeoutMs / 1000, (receiveTimeoutMs % 1000) * 1000};
+#endif
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    return s;
+}
+
+bool sendNative(const NativeSocket s, const QByteArray& data) {
+    qsizetype sent = 0;
+    while (sent < data.size()) {
+        const auto n = ::send(s, data.constData() + sent, static_cast<int>(data.size() - sent), 0);
+        if (n <= 0) {
+            return false;
+        }
+        sent += n;
+    }
+    return true;
+}
+
+// Reads until the data holds until (or the connection ends, or the receive timeout passes).
+QByteArray receiveNative(const NativeSocket s, const QByteArray& until) {
+    QByteArray data;
+    char chunk[4096];
+    while (!data.contains(until)) {
+        const auto n = ::recv(s, chunk, sizeof(chunk), 0);
+        if (n <= 0) {
+            break;
+        }
+        data.append(chunk, n);
+    }
+    return data;
+}
+
+void halfCloseNative(const NativeSocket s) {
+#ifdef _WIN32
+    ::shutdown(s, SD_SEND);
+#else
+    ::shutdown(s, SHUT_WR);
 #endif
 }
 
@@ -526,10 +608,10 @@ TEST_CASE("Remote API server: connections over the limit are answered 503 at onc
 TEST_CASE("Remote API server: idle connections give way to a real client", "[remote-api][server]") {
     Fixture fixture;
     LC_RemoteApiServer::Limits limits;
-    limits.maxConnections = 2;
+    limits.maxIncoming = 2;
     const quint16 port = fixture.start(limits); // 5 s for the headers
 
-    // every reader holds a connection that sends nothing (no token needed for that)
+    // the connections still sending their headers are all ones that send nothing (no token needed for that)
     std::vector<std::unique_ptr<QTcpSocket>> idle;
     for (int i = 0; i < 2; ++i) {
         auto socket = std::make_unique<QTcpSocket>();
@@ -561,6 +643,114 @@ TEST_CASE("Remote API server: idle connections give way to a real client", "[rem
         }
     }
     CHECK(first.startsWith("HTTP/1.1 408"));
+}
+
+TEST_CASE("Remote API server: a burst of whole requests is answered 503, never taken for idle", "[remote-api][server]") {
+    Fixture fixture;
+    LC_RemoteApiServer::Limits limits;
+    limits.maxConnections = 3;
+    const quint16 port = fixture.start(limits);
+
+    // two requests wait for their bodies: one reader is free
+    std::vector<std::unique_ptr<QTcpSocket>> busy;
+    busy.push_back(partialRequest(port, fixture.token));
+    busy.push_back(partialRequest(port, fixture.token));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // Each client sends its whole request at once, for a GUI route: nothing pumps
+    // the GUI thread yet, so the one that gets the free reader keeps it.
+    constexpr int Burst = 6;
+    std::vector<HttpReply> replies(Burst);
+    std::atomic<int> done{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> clients;
+    for (int i = 0; i < Burst; ++i) {
+        clients.emplace_back([&, i] {
+            while (!go.load()) {
+                std::this_thread::yield();
+            }
+            replies[i] = exchange(port, get("/api/v1/gui", port, fixture.token), 10000);
+            ++done;
+        });
+    }
+    go = true;
+    QElapsedTimer timer;
+    timer.start();
+    while (done.load() < Burst - 1 && timer.elapsed() < 5000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(done.load() == Burst - 1); // the refusals came at once
+    // LibreCAD is free again: the one that was let in runs
+    QElapsedTimer pumping;
+    pumping.start();
+    while (done.load() < Burst && pumping.elapsed() < 10000) {
+        pumpFor(20);
+    }
+    for (std::thread& client : clients) {
+        client.join();
+    }
+    int served = 0;
+    int busyAnswers = 0;
+    for (const HttpReply& reply : replies) {
+        CAPTURE(reply.status, reply.error(), reply.json.value("detail").toString());
+        CHECK(reply.status != 408); // their headers had all arrived
+        served += reply.status == 200 ? 1 : 0;
+        if (reply.status == 503) {
+            CHECK(reply.error() == "server_busy");
+            CHECK(reply.json.value("hint").toString() == "retry in a moment");
+            ++busyAnswers;
+        }
+    }
+    CHECK(served == 1);
+    CHECK(busyAnswers == Burst - 1);
+}
+
+TEST_CASE("Remote API server: a flood of idle connections does not lock a real client out", "[remote-api][server]") {
+    Fixture fixture;
+    LC_RemoteApiServer::Limits limits;
+    limits.maxIncoming = 16; // filled within a few dozen ms
+    const quint16 port = fixture.start(limits);
+
+    // a local program without the token opens connections that send nothing, a few hundred per second
+    std::atomic<bool> stop{false};
+    std::vector<NativeSocket> flood; // the flooder's own until it is joined
+    std::thread flooder([&] {
+        while (!stop.load()) {
+            for (int i = 0; i < 6; ++i) { // then a sleep of 10 to 16 ms (the timer's resolution)
+                const NativeSocket s = connectNative(port);
+                if (s != NoSocket) {
+                    flood.push_back(s);
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    int served = 0;
+    qint64 slowest = 0;
+    for (int i = 0; i < 20; ++i) {
+        QElapsedTimer timer;
+        timer.start();
+        const HttpReply reply = exchange(port, get("/api/v1/ping", port, fixture.token), 5000);
+        slowest = std::max(slowest, timer.elapsed());
+        CAPTURE(i, reply.status, reply.error());
+        CHECK(reply.status == 200);
+        served += reply.status == 200 ? 1 : 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
+    stop = true;
+    flooder.join();
+    CHECK(served == 20);
+    CHECK(slowest < 2000);
+    CAPTURE(flood.size());
+    CHECK(flood.size() > 200); // the flood did run, at a few hundred per second
+    // the idle connections that had to make room were answered 408
+    QByteArray first = receiveNative(flood.front(), "\r\n\r\n");
+    CHECK(first.startsWith("HTTP/1.1 408"));
+    for (const NativeSocket s : flood) {
+        closeNative(s);
+    }
+    CHECK(send(port, get("/api/v1/ping", port, fixture.token)).status == 200);
 }
 
 TEST_CASE("Remote API server refuses a client without the token before its body", "[remote-api][server]") {
@@ -687,6 +877,99 @@ TEST_CASE("Remote API server: a queued request whose client closed never runs", 
     holder.join();
     CHECK(first.status == 200);
     CHECK(runs.load() == 0);
+}
+
+TEST_CASE("Remote API server: a client that closes after reading the interim answer is gone", "[remote-api][server]") {
+    Fixture fixture;
+    std::atomic<int> runs{0};
+    LC_RouteOptions gui;
+    gui.capability = "test";
+    fixture.router.add("POST", "/api/v1/slow", gui, [](LC_ApiCall&) { return LC_ApiResponse::ok({}); });
+    fixture.router.add("POST", "/api/v1/count", gui, [&runs](LC_ApiCall&) {
+        ++runs;
+        return LC_ApiResponse::ok({}, 201);
+    });
+    LC_RemoteApiServer::Limits limits;
+    limits.interimRepeatMs = 200; // 1 s in the application
+    const quint16 port = fixture.start(limits);
+    const QByteArray head = "Host: 127.0.0.1:" + QByteArray::number(port) + "\r\nX-Api-Token: " + fixture.token + "\r\n";
+    const QByteArray count = "POST /api/v1/count HTTP/1.1\r\n" + head + "Content-Length: 0\r\n\r\n";
+
+    SECTION("closed after the first interim answer: the queued request never runs") {
+        HttpReply first;
+        std::thread holder([&] { first = exchange(port, "POST /api/v1/slow HTTP/1.1\r\n" + head + "Content-Length: 0\r\n\r\n", 20000); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        // as a relay does: the request, a half-close, the interim answer read, then the socket closed
+        const NativeSocket s = connectNative(port);
+        REQUIRE(s != NoSocket);
+        REQUIRE(sendNative(s, count));
+        halfCloseNative(s);
+        const QByteArray interim = receiveNative(s, "\r\n\r\n");
+        CHECK(interim.startsWith("HTTP/1.1 100 Continue\r\n\r\n"));
+        closeNative(s);
+        std::this_thread::sleep_for(std::chrono::milliseconds(700)); // the next interim answer meets a reset
+        pumpFor(300); // LibreCAD is free again
+        holder.join();
+        CHECK(first.status == 200);
+        pumpFor(200);
+        CHECK(runs.load() == 0);
+    }
+    SECTION("still half-closed: several interim answers, then the final one") {
+        HttpReply first;
+        std::thread holder([&] { first = exchange(port, "POST /api/v1/slow HTTP/1.1\r\n" + head + "Content-Length: 0\r\n\r\n", 20000); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        Exchange halfClosed;
+        halfClosed.halfClose = true;
+        HttpReply reply;
+        std::atomic<bool> done{false};
+        std::thread client([&] {
+            reply = exchange(port, count, 20000, &halfClosed);
+            done = true;
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        QElapsedTimer pumping;
+        pumping.start();
+        while (!done.load() && pumping.elapsed() < 10000) {
+            pumpFor(20);
+        }
+        holder.join();
+        client.join();
+        CHECK(first.status == 200);
+        CHECK(reply.status == 201);
+        CHECK(halfClosed.interim >= 2);
+        CHECK(runs.load() == 1);
+    }
+}
+
+TEST_CASE("Remote API server: X-Request-Timeout-Ms is one whole number of milliseconds", "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start();
+    const QByteArray header = "X-Request-Timeout-Ms: ";
+
+    // A client that believes it capped its wait must not wait without bound: what
+    // is not a number of milliseconds from 1 to 600000 is refused, not ignored.
+    for (const char* value : {"0", "-1", "abc", "1e3", "700.5", "0x2bc", "+700", "99999999999999999999", "600001", ""}) {
+        CAPTURE(value);
+        const HttpReply reply = send(port, get("/api/v1/ping", port, fixture.token, header + value + "\r\n"));
+        CHECK(reply.status == 400);
+        CHECK(reply.error() == "bad_header");
+        CHECK(reply.json.value("header").toString() == "X-Request-Timeout-Ms");
+        CHECK(reply.json.value("max").toInteger() == 600000);
+    }
+    // sent twice, the header arrives as "700, 700"
+    HttpReply reply = send(port, get("/api/v1/ping", port, fixture.token, header + "700\r\n" + header + "700\r\n"));
+    CHECK(reply.status == 400);
+    CHECK(reply.error() == "bad_header");
+    for (const char* value : {"700", " 700 ", "600000", "0700"}) {
+        CAPTURE(value);
+        CHECK(send(port, get("/api/v1/ping", port, fixture.token, header + value + "\r\n")).status == 200);
+    }
+    // 1 ms is a deadline too (the answer may beat it, or be 504)
+    reply = send(port, get("/api/v1/ping", port, fixture.token, header + "1\r\n"));
+    CHECK((reply.status == 200 || (reply.status == 504 && reply.error() == "ui_timeout")));
+    // the token is checked first
+    reply = send(port, get("/api/v1/ping", port, {}, header + "abc\r\n"));
+    CHECK(reply.status == 401);
 }
 
 TEST_CASE("Remote API server answers small requests at once", "[remote-api][server]") {
