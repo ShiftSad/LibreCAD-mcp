@@ -4905,8 +4905,14 @@ void RS_FilterDXFRW::addBlock(const DRW_Block &data) {
   } else {
     if (mid.toLower() == "model_space") {
       m_blockHash.insert(data.parentHandle, m_graphic);
+      m_currentContainer = m_graphic;
     } else {
       m_blockHash.insert(data.parentHandle, m_dummyContainer);
+      // LibreCAD keeps no paper space. What a layout's block holds (the
+      // *Paper_Space0, ... of a DWG or DXF, or a DXF's *Paper_Space) is
+      // delivered inside this scope and must not land in model space.
+      if (m_dummyContainer != nullptr)
+        m_currentContainer = m_dummyContainer;
     }
     // Layouts name these block records; a save must find them by name.
     m_graphic->dwgAdvancedMetadata().addSpaceBlockRecord(
@@ -5174,6 +5180,37 @@ void RS_FilterDXFRW::endBlock() {
   }
   m_currentContainer = m_graphic;
 }
+
+RS_EntityContainer *
+RS_FilterDXFRW::importContainerFor(const DRW_Entity &data) const {
+  // A DWG delivers the entities of its *Paper_Space after that block scope
+  // has closed, and a DXF keeps them in ENTITIES: model space is then the
+  // current container, and only the entity's own paper space flag tells.
+  if (data.space == DRW::PaperSpace && m_graphic != nullptr &&
+      m_currentContainer == m_graphic && m_dummyContainer != nullptr)
+    return m_dummyContainer;
+  return m_currentContainer;
+}
+
+namespace {
+// Points the import at the container one entity goes to, for the length of
+// the callback that adds it, and back at the current one afterwards.
+class ImportContainerScope {
+public:
+  ImportContainerScope(RS_EntityContainer *&current,
+                       RS_EntityContainer *target) noexcept
+      : m_current(current), m_previous(current) {
+    m_current = target;
+  }
+  ~ImportContainerScope() { m_current = m_previous; }
+  ImportContainerScope(const ImportContainerScope &) = delete;
+  ImportContainerScope &operator=(const ImportContainerScope &) = delete;
+
+private:
+  RS_EntityContainer *&m_current;
+  RS_EntityContainer *const m_previous;
+};
+} // namespace
 
 namespace {
 // F2 type-fidelity sidecar markers. POINT and LINE coordinates are WCS, but
@@ -5645,6 +5682,8 @@ struct InsertAttribSidecar {
  * Implementation of the method which handles point entities.
  */
 void RS_FilterDXFRW::addPoint(const DRW_Point &data) {
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   const RS_Vector v(data.basePoint.x, data.basePoint.y);
   const auto entity = new RS_Point(m_currentContainer, RS_PointData(v));
   setEntityAttributes(entity, &data);
@@ -5666,6 +5705,8 @@ void RS_FilterDXFRW::addPoint(const DRW_Point &data) {
  */
 void RS_FilterDXFRW::addLine(const DRW_Line &data) {
   RS_DEBUG->print("RS_FilterDXF::addLine");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
 
   RS_Vector v1(data.basePoint.x, data.basePoint.y);
   RS_Vector v2(data.secPoint.x, data.secPoint.y);
@@ -5702,6 +5743,8 @@ void RS_FilterDXFRW::addLine(const DRW_Line &data) {
 
 void RS_FilterDXFRW::add3DLine(const DRW_3DLine &data) {
   RS_DEBUG->print("RS_FilterDXF::add3DLine");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
 
   const auto entity =
       new RS_Line{m_currentContainer,
@@ -6888,6 +6931,8 @@ void completeEmbeddedMTextForDwg(DRW_MText &mtext, bool keepsScaleData) {
  */
 void RS_FilterDXFRW::addRay(const DRW_Ray &data) {
   RS_DEBUG->print("RS_FilterDXF::addRay");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
 
   RS_Vector v1{data.basePoint.x, data.basePoint.y};
   RS_Vector v2{data.basePoint.x + data.secPoint.x,
@@ -6925,6 +6970,8 @@ void RS_FilterDXFRW::addRay(const DRW_Ray &data) {
  */
 void RS_FilterDXFRW::addXline(const DRW_Xline &data) {
   RS_DEBUG->print("RS_FilterDXF::addXline");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
 
   RS_Vector v1(data.basePoint.x, data.basePoint.y);
   RS_Vector v2(data.basePoint.x + data.secPoint.x,
@@ -6973,6 +7020,8 @@ bool canCreatePlanarEntity(const T &entity, const char *typeName) {
 
 void RS_FilterDXFRW::addCircle(const DRW_Circle &data) {
   RS_DEBUG->print("RS_FilterDXF::addCircle");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   if (!canCreatePlanarEntity(data, "addCircle"))
     return;
 
@@ -6997,6 +7046,8 @@ void RS_FilterDXFRW::addCircle(const DRW_Circle &data) {
  */
 void RS_FilterDXFRW::addArc(const DRW_Arc &data) {
   RS_DEBUG->print("RS_FilterDXF::addArc");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   if (!canCreatePlanarEntity(data, "addArc"))
     return;
   const RS_Vector v(data.basePoint.x, data.basePoint.y);
@@ -7021,6 +7072,8 @@ void RS_FilterDXFRW::addArc(const DRW_Arc &data) {
  */
 void RS_FilterDXFRW::addEllipse(const DRW_Ellipse &data) {
   RS_DEBUG->print("RS_FilterDXFRW::addEllipse");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   if (!canCreatePlanarEntity(data, "addEllipse"))
     return;
 
@@ -7041,6 +7094,8 @@ void RS_FilterDXFRW::addEllipse(const DRW_Ellipse &data) {
  * Implementation of the method which handles trace entities.
  */
 void RS_FilterDXFRW::addTrace(const DRW_Trace &data) {
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   // Pre-R13 (AC1009) typed LINEAR/ALIGNED dimensions rebuild arrows in
   // RS_DimLinear/RS_DimAligned. ENTITIES-section SOLID/TRACE records are
   // duplicate *D-block graphics (ACEB10 and peers); importing them inflates
@@ -7094,6 +7149,8 @@ void RS_FilterDXFRW::addTrace(const DRW_Trace &data) {
 }
 
 void RS_FilterDXFRW::addTolerance(const DRW_Tolerance &data) {
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   const RS_Vector insertionPoint{data.insertionPoint.x, data.insertionPoint.y};
   const RS_Vector axisDirectionVector{data.xAxisDirectionVector.x,
                                       data.xAxisDirectionVector.y};
@@ -7243,6 +7300,8 @@ void RS_FilterDXFRW::addModelerGeometry(const DRW_ModelerGeometry &data) {
   // undecodable bodies keep the previous metadata-only behavior (no
   // regression).
   DRW_ModelerGeometry &mut = const_cast<DRW_ModelerGeometry &>(data);
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   if (mut.decodeWireframe() && !mut.m_wireframe.edges.empty()) {
     std::vector<RS_Entity *> ents =
         acisWireframeToEntities(mut.m_wireframe, m_currentContainer);
@@ -7273,6 +7332,8 @@ void RS_FilterDXFRW::addSurface(const DRW_Surface *data) {
   // avoid emitting anything for bodies we cannot decode (no regression over the
   // base no-op).
   DRW_Surface *surf = const_cast<DRW_Surface *>(data);
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
   if (surf->decodeWireframe() && !surf->m_wireframe.edges.empty()) {
     std::vector<RS_Entity *> ents =
         acisWireframeToEntities(surf->m_wireframe, m_currentContainer);
@@ -7398,6 +7459,8 @@ void RS_FilterDXFRW::addLWPolyline(const DRW_LWPolyline &data) {
   if (data.vertlist.empty()) {
     return;
   }
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
 
   // libdxfrw has already applied the OCS frame before this callback. A
   // LibreCAD polyline is strictly 2D, so only the two normalized axial
@@ -7493,6 +7556,8 @@ void RS_FilterDXFRW::addMLine(const DRW_MLine *data) {
   RS_DEBUG->print("RS_FilterDXFRW::addMLine");
   if (!data || data->vertlist.empty() || data->numLines == 0)
     return;
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   const int N = data->numLines;
   QString styleName = QString::fromUtf8(data->styleName.c_str());
@@ -7639,6 +7704,8 @@ void RS_FilterDXFRW::addUnderlay(const DRW_Underlay *data) {
   RS_DEBUG->print("RS_FilterDXFRW::addUnderlay");
   if (!data)
     return;
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   // Build clip polygon in WCS. clipBoundary is in OCS-2D; for a typical
   // 2D extrusion (extPoint == (0,0,1)), OCS == WCS modulo position +
@@ -7741,6 +7808,8 @@ void RS_FilterDXFRW::addUnderlay(const DRW_Underlay *data) {
  */
 void RS_FilterDXFRW::addPolyline(const DRW_Polyline &data) {
   RS_DEBUG->print("RS_FilterDXFRW::addPolyline");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   if (data.flags & 0x10) {
     // the polyline is a polygon mesh
     int M = data.vertexcount;
@@ -8068,6 +8137,8 @@ bool RS_FilterDXFRW::handleQuadraticConicSpline(const DRW_Spline *data) {
  */
 void RS_FilterDXFRW::addSpline(const DRW_Spline *data) {
   RS_DEBUG->print("RS_FilterDXFRW::addSpline: degree: %d", data->degree);
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   // Special case: rational quadratic conic (hyperbola or parabola)
   if (handleQuadraticConicSpline(data)) {
@@ -8191,6 +8262,8 @@ void RS_FilterDXFRW::addHelix(const DRW_Helix *data) {
  */
 void RS_FilterDXFRW::addInsert(const DRW_Insert &data) {
   RS_DEBUG->print("RS_FilterDXF::addInsert");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
 
   RS_Vector ip(data.basePoint.x, data.basePoint.y, data.basePoint.z);
   RS_Vector sc(data.xscale, data.yscale, data.zscale);
@@ -8280,6 +8353,8 @@ void RS_FilterDXFRW::addInsert(const DRW_Insert &data) {
 }
 
 void RS_FilterDXFRW::addTable(const DRW_Table &data) {
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   TableFallbackRenderSummary fallbackSummary;
   const bool fallbackRendered = addTableFallback(data, &fallbackSummary);
   if (m_graphic != nullptr) {
@@ -8539,6 +8614,8 @@ RS_MText *RS_FilterDXFRW::mtextEntityFromDRW(const DRW_MText &data) {
  */
 void RS_FilterDXFRW::addMText(const DRW_MText &data) {
   RS_DEBUG->print("RS_FilterDXF::addMText: %s", data.text.c_str());
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   auto *entity = mtextEntityFromDRW(data);
   entity->setParent(m_currentContainer);
   setEntityAttributes(entity, &data);
@@ -8562,6 +8639,8 @@ void RS_FilterDXFRW::addMText(const DRW_MText &data) {
  */
 void RS_FilterDXFRW::addText(const DRW_Text &data) {
   RS_DEBUG->print("RS_FilterDXFRW::addText");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   auto refPoint = RS_Vector(data.basePoint.x, data.basePoint.y);
   auto secPoint = RS_Vector(data.secPoint.x, data.secPoint.y);
   const double angle = data.angle;
@@ -9865,6 +9944,8 @@ void RS_FilterDXFRW::addDimAlign(const DRW_DimAligned *data) {
   if (data == nullptr || m_currentContainer == nullptr) {
     return;
   }
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   const RS_DimensionData dimensionData = convDimensionData(data);
 
@@ -9888,6 +9969,8 @@ void RS_FilterDXFRW::addDimLinear(const DRW_DimLinear *data) {
   if (data == nullptr || m_currentContainer == nullptr) {
     return;
   }
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   const RS_DimensionData dimensionData = convDimensionData(data);
 
@@ -9912,6 +9995,8 @@ void RS_FilterDXFRW::addDimRadial(const DRW_DimRadial *data) {
   if (data == nullptr || m_currentContainer == nullptr) {
     return;
   }
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   const RS_DimensionData dimensionData = convDimensionData(data);
   const RS_Vector dp(data->getDiameterPoint().x, data->getDiameterPoint().y);
@@ -9933,6 +10018,8 @@ void RS_FilterDXFRW::addDimDiametric(const DRW_DimDiametric *data) {
   if (data == nullptr || m_currentContainer == nullptr) {
     return;
   }
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   const RS_DimensionData dimensionData = convDimensionData(data);
   const RS_Vector dp(data->getDiameter1Point().x, data->getDiameter1Point().y);
@@ -9954,6 +10041,8 @@ void RS_FilterDXFRW::addDimAngular(const DRW_DimAngular *data) {
   if (data == nullptr || m_currentContainer == nullptr) {
     return;
   }
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   const RS_DimensionData dimensionData = convDimensionData(data);
   const RS_Vector dp1(data->getFirstLine1().x, data->getFirstLine1().y);
@@ -9979,6 +10068,8 @@ void RS_FilterDXFRW::addDimAngular3P(const DRW_DimAngular3p *data) {
   if (data == nullptr || m_currentContainer == nullptr) {
     return;
   }
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   const auto &vertexPoint = data->getVertexPoint();
 
@@ -10003,6 +10094,8 @@ void RS_FilterDXFRW::addDimArc(const DRW_DimArc *data) {
   if (data == nullptr || m_currentContainer == nullptr) {
     return;
   }
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
   RS_DimensionData dd = convDimensionData(data);
   RS_Vector centre(data->getArcCenter().x, data->getArcCenter().y);
   double radius = dd.definitionPoint.distanceTo(centre);
@@ -10024,6 +10117,8 @@ void RS_FilterDXFRW::addDimArc(const DRW_DimArc *data) {
 void RS_FilterDXFRW::addDimOrdinate(const DRW_DimOrdinate *data) {
   RS_DEBUG->print("RS_FilterDXFRW::addDimOrdinate(const DL_DimensionData&, "
                   "const DL_DimOrdinateData&) not yet implemented");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
   const RS_DimensionData dimensionData = convDimensionData(data);
 
   const RS_Vector featurePoint{data->getFirstLine().x, data->getFirstLine().y};
@@ -10047,6 +10142,8 @@ void RS_FilterDXFRW::addDimOrdinate(const DRW_DimOrdinate *data) {
  */
 void RS_FilterDXFRW::addLeader(const DRW_Leader *data) {
   RS_DEBUG->print("RS_FilterDXFRW::addDimLeader");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
   const RS_LeaderData d(data->arrow != 0,
                         QString::fromUtf8(data->style.c_str()));
   const auto leader = new RS_Leader(m_currentContainer, d);
@@ -10262,6 +10359,8 @@ void RS_FilterDXFRW::snapSplineEdgeEndpoints(RS_EntityContainer *hatchLoop) {
  */
 void RS_FilterDXFRW::addHatch(const DRW_Hatch *data) {
   RS_DEBUG->print("RS_FilterDXF::addHatch()");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
   const auto hatch = new RS_Hatch(
       m_currentContainer, RS_HatchData(data->solid, data->scale, data->angle,
                                        QString::fromUtf8(data->name.c_str())));
@@ -10427,6 +10526,8 @@ void RS_FilterDXFRW::addImage(const DRW_Image *data) {
 
   if (data == nullptr)
     return;
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   const RS_Vector ip(data->basePoint.x, data->basePoint.y);
   const RS_Vector uv(data->secPoint.x, data->secPoint.y);
@@ -10474,6 +10575,8 @@ void RS_FilterDXFRW::addWipeout(const DRW_Wipeout *data) {
   if (data == nullptr || data->clipPath.empty()) {
     return;
   }
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   LC_WipeoutData wipeoutData;
   wipeoutData.hasNativeFrame = true;
@@ -10520,6 +10623,8 @@ void RS_FilterDXFRW::addMLeader(const DRW_MLeader *data) {
   if (m_graphic != nullptr) {
     m_graphic->dwgAdvancedMetadata().addMLeader(*data);
   }
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(*data));
 
   LC_MLeaderData md;
   md.roots.reserve(data->context.roots.size());
@@ -33856,6 +33961,8 @@ RS_Pen RS_FilterDXFRW::attributesToPen(const DRW_Layer *att) const {
 
 void RS_FilterDXFRW::add3dFace(const DRW_3Dface &data) {
   RS_DEBUG->print("RS_FilterDXFRW::add3dFace");
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   RS_PolylineData d(RS_Vector(false), RS_Vector(false), !data.invisibleflag);
   auto *polyline = new RS_Polyline(m_currentContainer, d);
   setEntityAttributes(polyline, &data);
@@ -33891,6 +33998,8 @@ void RS_FilterDXFRW::add3dFace(const DRW_3Dface &data) {
 void RS_FilterDXFRW::addMesh(const DRW_Mesh &data) {
   RS_DEBUG->print("RS_FilterDXFRW::addMesh: %zu vertices, %zu faces",
                   data.vertices.size(), data.faces.size());
+  const ImportContainerScope containerScope(m_currentContainer,
+                                            importContainerFor(data));
   // Render the base-cage faces as closed polylines (LibreCAD is 2D; Z dropped,
   // matching add3dFace). Each face is a list of vertex indices into vertices[].
   for (const auto &face : data.faces) {

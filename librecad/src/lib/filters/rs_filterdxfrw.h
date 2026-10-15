@@ -3328,6 +3328,11 @@ private:
   /** Pointer to entity container to store possible orphan entities like paper
    * space */
   RS_EntityContainer *m_dummyContainer = nullptr;
+  /** The container an imported entity goes to. LibreCAD keeps no paper
+   *  space: an entity flagged as paper space (DXF group 67, DWG entity mode
+   *  1) that arrives while model space is the current container belongs to
+   *  the first layout, and goes to m_dummyContainer instead. */
+  RS_EntityContainer *importContainerFor(const DRW_Entity &data) const;
   void applyParsedDimStyleExtData(const LC_DimStyle *dimStyle,
                                   const QString &appName,
                                   const std::vector<DRW_Variant> &vector);
