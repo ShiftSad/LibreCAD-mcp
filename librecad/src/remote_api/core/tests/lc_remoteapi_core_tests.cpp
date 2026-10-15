@@ -236,6 +236,48 @@ TEST_CASE("Remote API parser refuses malformed requests", "[remote-api][core][ht
     }
 }
 
+TEST_CASE("Remote API parser refuses a bare LF at once and skips an empty line first", "[remote-api][core][http]") {
+    SECTION("a request typed with LF line endings is a 400 as soon as the LF arrives") {
+        // waiting for a CRLF CRLF that never comes ended in a 408 after the header timeout
+        for (const QByteArray& bad : {QByteArray("GET /api/v1/status HTTP/1.1\nHost: x\n\n"),
+                                      QByteArray("GET /api/v1/status HTTP/1.1\n"),
+                                      QByteArray("GET /x HTTP/1.1\r\nHost: x\nX-Api-Token: t\r\n\r\n"),
+                                      QByteArray("\nGET /x HTTP/1.1\r\n\r\n")}) {
+            CAPTURE(bad);
+            LC_HttpRequestParser parser;
+            REQUIRE(parser.feed(bad) == State::Error);
+            CHECK(parser.error().status == 400);
+            CHECK(parser.error().token == "bad_request");
+            CHECK(parser.error().detail == "lines must end with CRLF");
+        }
+        // a CR and its LF in two reads are a CRLF
+        LC_HttpRequestParser split;
+        CHECK(split.feed("GET /x HTTP/1.1\r") == State::Incomplete);
+        CHECK(split.feed("\nHost: x\r\n\r") == State::Incomplete);
+        CHECK(split.feed("\n") == State::Complete);
+        // the body is not the head: it may hold any bytes
+        const auto withBody = parse("POST /x HTTP/1.1\r\nContent-Length: 4\r\n\r\n\n\n\r\n");
+        CHECK(withBody.state() == State::Complete);
+        CHECK(withBody.request().body == "\n\n\r\n");
+    }
+    SECTION("empty lines before the request line are ignored (RFC 9112 2.2)") {
+        const auto one = parse("\r\nGET /api/v1/status HTTP/1.1\r\nHost: x\r\n\r\n");
+        REQUIRE(one.state() == State::Complete);
+        CHECK(one.request().path == "/api/v1/status");
+        LC_HttpRequestParser parts;
+        CHECK(parts.feed("\r") == State::Incomplete);
+        CHECK(parts.feed("\n\r\n") == State::Incomplete);
+        CHECK(parts.feed("GET /x HTTP/1.1\r\nHost: x\r\n\r\n") == State::Complete);
+        CHECK(parts.request().path == "/x");
+        // they count toward the header limit
+        LC_HttpRequestParser many;
+        CHECK(many.feed(QByteArray(LC_HttpRequestParser::DefaultMaxHeaderBytes, '\n').replace('\n', "\r\n").left(
+                  LC_HttpRequestParser::DefaultMaxHeaderBytes)) == State::Incomplete);
+        CHECK(many.feed("GET /x HTTP/1.1\r\n\r\n") == State::Error);
+        CHECK(many.error().status == 431);
+    }
+}
+
 TEST_CASE("Remote API parser reports a short body at the end of the connection", "[remote-api][core][http]") {
     LC_HttpRequestParser parser;
     CHECK(parser.feed("POST /x HTTP/1.1\r\nContent-Length: 10\r\n\r\n12345") == State::Incomplete);

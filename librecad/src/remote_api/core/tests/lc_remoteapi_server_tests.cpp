@@ -1137,6 +1137,22 @@ TEST_CASE("Remote API server answers Expect: 100-continue before the body", "[re
     }
 }
 
+TEST_CASE("Remote API server answers a request with bare LF line endings at once", "[remote-api][server]") {
+    Fixture fixture;
+    const quint16 port = fixture.start(); // 5 s for the headers
+    QElapsedTimer timer;
+    timer.start();
+    // as typed into ncat: the request never ends with CRLF CRLF
+    const HttpReply reply = exchange(port, "GET /api/v1/ping HTTP/1.1\nHost: 127.0.0.1:" + QByteArray::number(port) +
+                                               "\nX-Api-Token: " + fixture.token + "\n\n", 8000);
+    CHECK(reply.status == 400);
+    CHECK(reply.error() == "bad_request");
+    CHECK(reply.json.value("detail").toString() == "lines must end with CRLF");
+    CHECK(timer.elapsed() < 2000); // not 408 after the 5 s header timeout
+    // an empty line before the request line is ignored (RFC 9112 2.2)
+    CHECK(exchange(port, "\r\n" + get("/api/v1/ping", port, fixture.token)).status == 200);
+}
+
 TEST_CASE("Remote API server: a second server cannot take the port", "[remote-api][server]") {
     Fixture fixture;
     const quint16 port = fixture.start();
