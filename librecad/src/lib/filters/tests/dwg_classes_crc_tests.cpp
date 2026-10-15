@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "intern/dwgbuffer.h"
@@ -94,13 +95,16 @@ std::vector<std::uint8_t> makeDataPage(const std::vector<std::uint8_t>& payload)
 struct ClassesSection {
     std::vector<std::uint8_t> bytes;
     std::size_t crcOffset = 0;
+    std::size_t stringBits = 0;
 };
 
-// Lays out a one-class CLASSES section the way AutoCAD 2007+ saves it: RL
-// size, the optional RL high size word, RL bit size, class data, string
-// stream, string stream footer and end bit, padding, CRC, END sentinel and
-// eight unknown bytes.
-ClassesSection makeAutoCadClassesSection(DRW::Version version, bool hasHSize) {
+// Lays out a CLASSES section the way AutoCAD 2007+ saves it: RL size, the
+// optional RL high size word, RL bit size, class data, string stream, string
+// stream footer and end bit, padding, CRC, END sentinel and eight unknown
+// bytes. A string stream of more than 0x7FFF bits stores its size in two
+// words, the high word in front of the flagged low word.
+ClassesSection makeAutoCadClassesSection(DRW::Version version, bool hasHSize,
+                                         int classCount = 1) {
     dwgBufferW section;
     section.putBytes(dwgSentinels::CLASSES_BEGIN, 16);
     const std::size_t sizeOffset = section.size();
@@ -111,24 +115,36 @@ ClassesSection makeAutoCadClassesSection(DRW::Version version, bool hasHSize) {
     section.putRawLong32(0);
 
     dwgBufferW strings;
-    section.putBitShort(500); // maximum class number
+    // maximum class number
+    section.putBitShort(static_cast<std::uint16_t>(499 + classCount));
     section.putRawChar8(0);
     section.putRawChar8(0);
     section.putBit(1);
-    section.putBitShort(500);
-    section.putBitShort(0x401);
-    strings.putVariableText(version, "TEST_APP");
-    strings.putVariableText(version, "AcDbTestEntity");
-    strings.putVariableText(version, "TEST_ENTITY");
-    section.putBit(0);
-    section.putBitShort(0x1F2);
-    for (int i = 0; i < 5; ++i)
-        section.putBitLong(0);
+    for (int classIndex = 0; classIndex < classCount; ++classIndex) {
+        const std::string suffix =
+            classIndex == 0 ? std::string() : std::to_string(classIndex);
+        section.putBitShort(static_cast<std::uint16_t>(500 + classIndex));
+        section.putBitShort(0x401);
+        strings.putVariableText(version, "TEST_APP");
+        strings.putVariableText(version, "AcDbTestEntity" + suffix);
+        strings.putVariableText(version, "TEST_ENTITY" + suffix);
+        section.putBit(0);
+        section.putBitShort(0x1F2);
+        for (int i = 0; i < 5; ++i)
+            section.putBitLong(0);
+    }
 
     section.alignToByte();
     strings.alignToByte();
     section.putBytes(strings.data().data(), strings.size());
-    section.putRawShort16(static_cast<std::uint16_t>(strings.size() * 8));
+    const std::size_t stringBits = strings.size() * 8;
+    if (stringBits > 0x7FFF) {
+        section.putRawShort16(static_cast<std::uint16_t>(stringBits >> 15));
+        section.putRawShort16(
+            static_cast<std::uint16_t>((stringBits & 0x7FFF) | 0x8000));
+    } else {
+        section.putRawShort16(static_cast<std::uint16_t>(stringBits));
+    }
     section.putBit(1);
     // The bit size counts from its own field through the end bit.
     section.patchRawLong32(
@@ -141,6 +157,7 @@ ClassesSection makeAutoCadClassesSection(DRW::Version version, bool hasHSize) {
 
     ClassesSection result;
     result.crcOffset = section.size();
+    result.stringBits = stringBits;
     section.putRawShort16(section.crc16(0xC0C1, 16, section.size()));
     section.putBytes(dwgSentinels::CLASSES_END, 16);
     const std::vector<std::uint8_t> unknown(8, 0);
@@ -162,9 +179,11 @@ std::size_t classesCrcMismatches(const std::vector<std::uint8_t>& section,
 
 template <typename Reader>
 void checkClassesCrc(DRW::Version version, std::uint8_t maintenanceVersion,
-                     bool hasHSize) {
+                     bool hasHSize, int classCount = 1) {
     const ClassesSection section =
-        makeAutoCadClassesSection(version, hasHSize);
+        makeAutoCadClassesSection(version, hasHSize, classCount);
+    // Only a stream of more than 4 KiB of strings uses the two-word size.
+    REQUIRE((section.stringBits > 0x7FFF) == (classCount > 1));
     const auto storedCrc = [&section](const std::vector<std::uint8_t>& bytes) {
         return bytes[section.crcOffset]
             | (bytes[section.crcOffset + 1] << 8);
@@ -204,5 +223,21 @@ TEST_CASE("R2010+ CLASSES CRC is read after the string stream footer",
     SECTION("AC1032") {
         // AutoCAD 2018 through 2026 always write the high size word.
         checkClassesCrc<dwgReader32>(DRW::AC1032, 0, true);
+    }
+}
+
+TEST_CASE("CLASSES CRC is found after a two-word string stream size",
+          "[dwg][classes]") {
+    // More than 4 KiB of class strings needs a second string size word in
+    // the footer, in front of the flagged low word and the end bit.
+    constexpr int classCount = 64;
+    SECTION("AC1021") {
+        checkClassesCrc<dwgReader21>(DRW::AC1021, 0, false, classCount);
+    }
+    SECTION("AC1024") {
+        checkClassesCrc<dwgReader24>(DRW::AC1024, 8, true, classCount);
+    }
+    SECTION("AC1032") {
+        checkClassesCrc<dwgReader32>(DRW::AC1032, 0, true, classCount);
     }
 }

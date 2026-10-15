@@ -8192,15 +8192,18 @@ TEST_CASE("DRW_Dictionary rejects a body that crosses its AC1027 boundary",
 }
 
 // AutoCAD 2018+ (AC1032) writes dictionary pairs whose item handle is null:
-// ACAD_PARALLEL_BACKGROUND in a viewport extension dictionary with no
-// background, and empty-named slots left by erased entries. The encoder cannot
-// produce them, so the frame is assembled by hand in the R2013+ layout.
+// ACAD_PARALLEL_BACKGROUND in the named-object dictionary's ACAD_BACKGROUND
+// dictionary (owner 0xC), and empty-named slots such as those seen in the
+// named-object dictionary and the FBXASSET/ACAD_XREC_ROUNDTRIP extension
+// dictionaries. The encoder cannot produce them, so the frame is assembled by
+// hand in the R2013+ layout.
 TEST_CASE("DRW_Dictionary drops AC1032 entries with a null item handle",
           "[dwg-read][object-encode][dictionary][r2018]") {
     const DRW::Version version = DRW::AC1032;
     struct Item {
         std::string name;
         std::uint64_t handle;
+        std::uint8_t code = DRW::DwgSoftOwnership;
     };
     const auto emit = [version](int hardOwner, const std::vector<Item>& items,
                                 std::uint32_t& handleBits) {
@@ -8221,7 +8224,7 @@ TEST_CASE("DRW_Dictionary drops AC1032 entries with a null item handle",
             // AutoCAD keeps the soft-owner code on null items, even when the
             // dictionary hard-owns its members.
             dwgHandle itemHandle;
-            itemHandle.code = DRW::DwgSoftOwnership;
+            itemHandle.code = item.code;
             itemHandle.ref = static_cast<std::uint32_t>(item.handle);
             itemHandle.ref64 = item.handle;
             handles.putHandle(itemHandle);
@@ -8273,7 +8276,7 @@ TEST_CASE("DRW_Dictionary drops AC1032 entries with a null item handle",
         CHECK(parsed.m_entries.empty());
     }
 
-    SECTION("an empty-named erased slot beside a live entry") {
+    SECTION("an empty-named null slot beside a live entry") {
         std::uint32_t handleBits = 0;
         auto bytes = emit(/*hardOwner=*/1,
                           {{"", 0}, {"FBXASSET", 0x18A}, {"", 0}},
@@ -8286,6 +8289,38 @@ TEST_CASE("DRW_Dictionary drops AC1032 entries with a null item handle",
         CHECK(parsed.m_entries[0].m_name == "FBXASSET");
         CHECK(parsed.m_entries[0].m_handle == 0x18Au);
         CHECK(parsed.isDwgPayloadValid(version));
+    }
+
+    SECTION("a hard-owned null item is dropped too") {
+        std::uint32_t handleBits = 0;
+        auto bytes = emit(/*hardOwner=*/1,
+                          {{"", 0, DRW::DwgHardOwnership},
+                           {"KEPT", 0x2A, DRW::DwgHardOwnership}},
+                          handleBits);
+        DRW_Dictionary parsed;
+        REQUIRE(parse(bytes, handleBits, parsed));
+        CHECK(parsed.hasCompleteDwgEntries());
+        REQUIRE(parsed.m_entries.size() == 1u);
+        CHECK(parsed.m_entries[0].m_name == "KEPT");
+        CHECK(parsed.m_entries[0].m_handle == 0x2Au);
+    }
+
+    SECTION("a null item without an ownership code is still rejected") {
+        // Zero bits read from a misaligned handle stream decode as a null
+        // reference; only an owned null stands for an absent member.
+        for (const std::uint8_t code :
+             {static_cast<std::uint8_t>(DRW::DwgNullReference),
+              static_cast<std::uint8_t>(DRW::DwgSoftPointer),
+              static_cast<std::uint8_t>(DRW::DwgHardPointer)}) {
+            CAPTURE(static_cast<int>(code));
+            std::uint32_t handleBits = 0;
+            auto bytes = emit(/*hardOwner=*/0,
+                              {{"ACAD_PARALLEL_BACKGROUND", 0, code}},
+                              handleBits);
+            DRW_Dictionary rejected;
+            CHECK_FALSE(parse(bytes, handleBits, rejected));
+            CHECK(rejected.m_entries.empty());
+        }
     }
 
     SECTION("an empty name with a live item is still rejected") {
@@ -11172,8 +11207,10 @@ TEST_CASE("DRW_CellStyleMap reads legacy cell styles with a real object size",
           "[dwg-read][object-encode][cellstylemap]") {
     // AutoCAD writes every cell style color in the true-color CMC form, even
     // in R2000, and back-patches the object size to the handle stream start.
-    for (const DRW::Version ver : {DRW::AC1015, DRW::AC1018}) {
-        CAPTURE(static_cast<int>(ver));
+    enum class ObjectSize { HandleStart, BeforeBodyEnd, PastBuffer,
+                            AfterHandles };
+    const auto encode = [](DRW::Version ver, int paddingBits,
+                           ObjectSize objectSize) {
         dwgBufferW encoded;
         emitObjectPreamble(encoded, ver, /*oType=*/603, /*handle=*/0xB13,
                            /*numReactors=*/1, /*xDictFlag=*/0);
@@ -11206,16 +11243,48 @@ TEST_CASE("DRW_CellStyleMap reads legacy cell styles with a real object size",
         encoded.putBitLong(1);               // style id
         encoded.putBitLong(1);               // style class
         encoded.putVariableText(ver, "_TITLE");
-        encoded.patchRawLong32AtBit(objectSizeBitOffset(encoded),
-                                    encoded.bitCount());
+        const std::uint32_t bodyEnd = encoded.bitCount();
+        for (int i = 0; i < paddingBits; ++i)
+            encoded.putBit(0);
+        const std::uint32_t handleStart = encoded.bitCount();
 
         encoded.putHandle(hardPtr(0x70));
         encoded.putHandle(handleWithCode(0x0A, 0x71));
         encoded.putHandle(handleWithCode(0x0A, 0x72));
         encoded.putHandle(hardPtr(0x11)); // content text style
         encoded.putHandle(hardPtr(0x14)); // border linetype
+        const std::uint32_t handleEnd = encoded.bitCount();
 
-        auto bytes = snapshot(encoded);
+        std::uint32_t objSize = handleStart;
+        switch (objectSize) {
+        case ObjectSize::HandleStart:
+            break;
+        case ObjectSize::BeforeBodyEnd:
+            objSize = bodyEnd - 8u;
+            break;
+        case ObjectSize::PastBuffer:
+            objSize = static_cast<std::uint32_t>((encoded.size() + 8u) * 8u);
+            break;
+        case ObjectSize::AfterHandles:
+            objSize = handleEnd;
+            break;
+        }
+        encoded.patchRawLong32AtBit(objectSizeBitOffset(encoded), objSize);
+        return snapshot(encoded);
+    };
+
+    // Padding bits may separate the data stream from the handle stream that
+    // objSize points at; the handles are still read from that boundary.
+    struct Layout {
+        DRW::Version ver;
+        int paddingBits;
+    };
+    for (const Layout layout :
+         {Layout{DRW::AC1015, 0}, Layout{DRW::AC1018, 0},
+          Layout{DRW::AC1015, 5}, Layout{DRW::AC1018, 5}}) {
+        const DRW::Version ver = layout.ver;
+        CAPTURE(static_cast<int>(ver), layout.paddingBits);
+        auto bytes = encode(ver, layout.paddingBits, ObjectSize::HandleStart);
         dwgBuffer reader(bytes.data(), bytes.size());
         DRW_CellStyleMap parsed;
         REQUIRE(DrwObjectEncodeTestAccess::parse(parsed, ver, &reader));
@@ -11243,6 +11312,30 @@ TEST_CASE("DRW_CellStyleMap reads legacy cell styles with a real object size",
         CHECK(style.m_id == 1);
         CHECK(style.m_styleClass == 1);
         CHECK(style.m_name == "_TITLE");
+    }
+
+    // objSize must sit between the end of the data stream and the handle
+    // stream: one inside the body, past the buffer or past the handles is
+    // rejected without publishing anything.
+    for (const DRW::Version ver : {DRW::AC1015, DRW::AC1018}) {
+        for (const ObjectSize objectSize :
+             {ObjectSize::BeforeBodyEnd, ObjectSize::PastBuffer,
+              ObjectSize::AfterHandles}) {
+            CAPTURE(static_cast<int>(ver), static_cast<int>(objectSize));
+            auto bytes = encode(ver, 0, objectSize);
+            dwgBuffer reader(bytes.data(), bytes.size());
+            DRW_CellStyleMap rejected;
+            rejected.parentHandle = 0x99;
+            rejected.reactorHandles.push_back(0x98);
+            rejected.xDictHandle = 0x97;
+            CHECK_FALSE(DrwObjectEncodeTestAccess::parse(rejected, ver,
+                                                         &reader));
+            CHECK_FALSE(reader.isGood());
+            CHECK(rejected.m_cellStyles.empty());
+            CHECK(rejected.parentHandle == 0);
+            CHECK(rejected.reactorHandles.empty());
+            CHECK(rejected.xDictHandle == 0u);
+        }
     }
 }
 

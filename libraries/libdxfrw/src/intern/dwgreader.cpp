@@ -6589,10 +6589,12 @@ bool dwgReader::readDwgClassesTail(dwgBuffer &buffer) {
   if (start > buffer.size() || buffer.size() - start < 16)
     return false;
 
-  // Prefer the current eight-byte form, then the legacy R2007 two-byte
-  // field, and finally the R2004 no-tail form.  Probe each candidate without
-  // poisoning the publishing cursor when a candidate is not the file's
-  // actual trailer layout.
+  // AutoCAD and ODA files put the END sentinel directly after the CRC, which
+  // the zero-byte probe matches.  The eight- and two-byte probes are kept for
+  // older or odd writers; the two-byte one also used to mask the R2007+
+  // readers' misplaced CRC offset.  Probe each candidate without poisoning
+  // the publishing cursor when a candidate is not the file's actual trailer
+  // layout.
   constexpr std::array<std::size_t, 3> candidateSizes = {8, 2, 0};
   for (const std::size_t tailSize : candidateSizes) {
     if (tailSize > buffer.size() - start ||

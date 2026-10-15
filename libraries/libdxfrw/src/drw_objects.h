@@ -2727,6 +2727,8 @@ public:
     name.clear();
     m_entries.clear();
     m_pendingEntryName.clear();
+    m_hasPendingEntry = false;
+    m_dxfEntrySeen = false;
     DRW_TableEntry::reset();
   }
 
@@ -2756,6 +2758,8 @@ public:
   std::vector<Entry> m_entries; /*!< dictionary entry names and item handles */
   std::optional<DRW_DictionaryCountCap> countCap;
   //! True only when a DWG parser validated every declared name/handle pair.
+  //! Pairs whose item handle is null are validated and consumed but not
+  //! published, so m_entries may hold fewer entries than the declared count.
   [[nodiscard]] bool hasCompleteDwgEntries() const noexcept {
     return m_dwgEntriesComplete;
   }
@@ -2766,7 +2770,11 @@ public:
 
 private:
   // Keep a DXF entry name private until its following handle is decoded.
+  // The name may be empty, so the flag, not the string, marks it pending.
   UTF8STRING m_pendingEntryName;
+  bool m_hasPendingEntry = false;
+  // Latched by the first DXF entry pair, published or dropped.
+  bool m_dxfEntrySeen = false;
   bool m_dwgEntriesComplete = false;
 };
 

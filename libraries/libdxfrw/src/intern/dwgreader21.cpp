@@ -1589,6 +1589,10 @@ bool dwgReader21::readDwgClasses(){
     // next byte boundary and the END sentinel follows it. The string data
     // itself ends before that footer and cannot locate the CRC.
     crcPosition = footerEndBit / 8 + 1;
+    if (!dwgSafety::range(crcPosition, 2, buff.size())) {
+        recordFailure(DwgIntegrityCheckKind::PageRange, si.Id);
+        return false;
+    }
     strBuff = dwgBuffer(tmpClassesData.data(), stringBufferSize, &decoder);
     DRW_DBG("\nclass string start bit: ");
     DRW_DBG(static_cast<unsigned long long>(stringStartBit));
