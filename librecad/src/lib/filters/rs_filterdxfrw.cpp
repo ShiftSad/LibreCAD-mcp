@@ -4118,7 +4118,8 @@ static QString dwgVersionDisplay(DRW::Version v) {
   case DRW::AC1027:
     return QStringLiteral("AutoCAD 2013");
   case DRW::AC1032:
-    return QStringLiteral("AutoCAD 2018");
+    // AutoCAD 2019 through 2026 still save in the 2018 format.
+    return QStringLiteral("AutoCAD 2018-2026");
   case DRW::UNKNOWNV:
   default:
     return QStringLiteral("unknown");

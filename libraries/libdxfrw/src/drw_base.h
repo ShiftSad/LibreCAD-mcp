@@ -83,7 +83,7 @@ enum Version {
     AC1021,       //!< AutoCAD 2007/2008/2009
     AC1024,       //!< AutoCAD 2010/2011/2012
     AC1027,       //!< AutoCAD 2013/2014/2015/2016/2017
-    AC1032,       //!< AutoCAD 2018/2019/2020
+    AC1032,       //!< AutoCAD 2018 through 2026 (still the current format)
 };
 
 /** Input interpretation for DXF text; it never changes export encoding.
