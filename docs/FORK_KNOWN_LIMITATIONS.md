@@ -50,5 +50,14 @@ Limits that remain:
   run.
 - While you have a dialog open in LibreCAD, every request answers `409 gui_modal_open`; the client
   goes on once you close it.
+- On Windows, the API refuses DXF and DWG paths with a character the system's ANSI code page cannot
+  hold (`400 bad_path`), because LibreCAD's DXF/DWG reader and writer open files by their ANSI
+  name and would read or write a different file. Accented Latin names such as `Residência.dxf`
+  work on Western systems. Saving such a name from LibreCAD's own dialogs has the same upstream
+  limitation. PDF, PNG and SVG exports take any name.
+- Requests run one at a time. A request sent without `X-Request-Timeout-Ms` waits for its turn
+  however long that takes; `librecad-mcp` always sends one.
+- An HTTP/1.0 client that closes its connection while its request is queued cannot be told from
+  one that only half-closed, so its request still runs. HTTP/1.1 clients are detected.
 - See [the Remote API README](remote-api/README.md) and [the MCP server README](../mcp/README.md)
   for what each tool accepts.
