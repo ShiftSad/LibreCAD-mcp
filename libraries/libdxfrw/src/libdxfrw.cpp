@@ -2079,11 +2079,15 @@ bool dxfRW::writeSequenceEnd(const DRW_Entity &owner) {
     // would. Left as "0" (hardcoded) this dropped the owner's layer outright,
     // and a name-only linetype reference the owner alone still used could
     // vanish between it and here.
+    // In the space of its owner: a SEQEND of a paper-space POLYLINE or
+    // INSERT is of the paper space too (group 67), like its VERTEXes.
     if (version > DRW::AC1009) {
         if (!writer->writeString(100, "AcDbEntity")) {
             m_writeError = true;
             return false;
         }
+        if (owner.space == DRW::PaperSpace)
+            writer->writeInt16(67, 1);
         writer->writeUtf8String(8, owner.layer);
         writer->writeUtf8String(6, owner.lineType);
         writer->writeInt16(62, owner.color);
@@ -2092,6 +2096,8 @@ bool dxfRW::writeSequenceEnd(const DRW_Entity &owner) {
             return false;
         }
     } else {
+        if (owner.space == DRW::PaperSpace)
+            writer->writeInt16(67, 1);
         writer->writeUtf8Caps(8, owner.layer);
         writer->writeUtf8Caps(6, owner.lineType);
         writer->writeInt16(62, owner.color);
@@ -3703,6 +3709,7 @@ bool dxfRW::writePolyline(DRW_Polyline *ent) {
     for (const auto& vertex : ent->vertlist) {
         DRW_Vertex *v = vertex.get();
         v->copyPresentationFrom(*ent);
+        v->space = ent->space;  // a paper-space POLYLINE's VERTEX: group 67
         writer->writeString(0, "VERTEX");
         if (!writeEntity(v, /*captureSourceHandle=*/true, parentHandle))
             return false;
@@ -4702,7 +4709,10 @@ bool dxfRW::writeInsert(DRW_Insert *ent){
     if (hasAttribs) {
         const std::uint32_t insertHandle = ent->handle;
         for (const auto &att : ent->attlist) {
-            if (att && !writeAttrib(att.get(), insertHandle))
+            if (!att)
+                continue;
+            att->space = ent->space;  // a paper-space INSERT's ATTRIB: group 67
+            if (!writeAttrib(att.get(), insertHandle))
                 return false;
         }
         if (!writeSequenceEnd(*ent))

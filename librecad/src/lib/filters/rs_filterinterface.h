@@ -103,6 +103,17 @@ public:
         return {};
     }
 
+    /**
+     * What a save of @p g in format @p type would leave out of what the
+     * drawing keeps, told before the save; empty if nothing. A save in place
+     * asks first, so that it does not overwrite a file with less than it
+     * holds.
+     */
+    virtual QString exportLeavesOut([[maybe_unused]] const RS_Graphic& g,
+                                    [[maybe_unused]] RS2::FormatType type) const {
+        return {};
+    }
+
     virtual QString lastError() const {
         return QObject::tr("undefined error", "RS_FilterInterface");
     }

@@ -982,6 +982,8 @@ public:
   struct Ole2FrameRecord {
     std::uint32_t handle = 0;
     std::uint32_t parentHandle = 0;
+    /** Paper space when read as such (DXF group 67, DWG entity mode 1). */
+    DRW::Space space = DRW::ModelSpace;
     std::uint16_t flags = 0;
     std::uint16_t mode = 0;
     std::uint32_t declaredPayloadLength = 0;
@@ -1006,6 +1008,8 @@ public:
   struct OleFrameRecord {
     std::uint32_t handle = 0;
     std::uint32_t parentHandle = 0;
+    /** Paper space when read as such (DXF group 67, DWG entity mode 1). */
+    DRW::Space space = DRW::ModelSpace;
     std::uint16_t flags = 0;
     std::uint16_t mode = 0;
     std::uint32_t declaredPayloadLength = 0;
@@ -5380,6 +5384,7 @@ public:
     Ole2FrameRecord record;
     record.handle = ole2Frame.handle;
     record.parentHandle = ole2Frame.parentHandle;
+    record.space = ole2Frame.space;
     record.flags = ole2Frame.m_flags;
     record.mode = ole2Frame.m_mode;
     record.declaredPayloadLength = ole2Frame.m_declaredPayloadLength;
@@ -5403,6 +5408,7 @@ public:
     OleFrameRecord record;
     record.handle = oleFrame.handle;
     record.parentHandle = oleFrame.parentHandle;
+    record.space = oleFrame.space;
     record.flags = oleFrame.m_flags;
     record.mode = oleFrame.m_mode;
     record.declaredPayloadLength = oleFrame.m_declaredPayloadLength;

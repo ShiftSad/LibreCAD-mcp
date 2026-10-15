@@ -5111,11 +5111,10 @@ bool RS_FilterDXFRW::embedXref(RS_Block *block, const QString &xrefPath,
         continue;
       const QString origName = extBk->getName();
       // Skip special blocks — *MODEL_SPACE/*PAPER_SPACE aren't in
-      // blockList anyway, but be defensive.
-      if (origName.startsWith(QLatin1String("*Model_Space"),
-                              Qt::CaseInsensitive) ||
-          origName.startsWith(QLatin1String("*Paper_Space"),
-                              Qt::CaseInsensitive)) {
+      // blockList anyway, but be defensive. Matched by exact name: a block
+      // named "*Paper_Space_Frame" is an ordinary block.
+      if (LC_PaperSpaceStore::isModelSpaceName(origName) ||
+          LC_PaperSpaceStore::isPaperSpaceName(origName)) {
         continue;
       }
       const QString nsName = blockName + "|" + origName;
@@ -5223,8 +5222,9 @@ void RS_FilterDXFRW::finishPaperSpaceImport() {
     m_graphic->setOwner(false);
     for (RS_Entity *entity : astray) {
       m_graphic->removeEntity(entity);
+      // In their order: addEntity() would put a hatch or an image first.
       entity->setParent(active);
-      active->addEntity(entity);
+      active->appendEntity(entity);
     }
     m_graphic->setOwner(owner);
     RS_DEBUG->print(RS_Debug::D_WARNING,
@@ -5273,7 +5273,13 @@ void RS_FilterDXFRW::finishPaperSpaceImport() {
     }
     return entities;
   };
-  const auto report = [](const QString &message) {
+  // Only a drawing opened as a document says so; a thumbnail, a template, a
+  // block-library preview or a style sample does not
+  // (RS_Graphic::setReportsImportNotices()).
+  const bool announce = m_graphic->reportsImportNotices();
+  const auto report = [announce](const QString &message) {
+    if (!announce)
+      return;
     RS_DIALOGFACTORY->commandMessage(message);
     std::cerr << message.toStdString() << "\n";
   };
@@ -5310,9 +5316,13 @@ void RS_FilterDXFRW::finishPaperSpaceImport() {
       for (auto &entity : paperSpaces.takeEntities(shown->name)) {
         if (!entity->getFlag(RS2::FlagDeleted))
           ++moved;
-        m_graphic->addEntity(entity.release());
+        // In the layout's drawing order: addEntity() would put a hatch or an
+        // image first.
+        RS_Entity *taken = entity.release();
+        taken->setParent(m_graphic);
+        m_graphic->appendEntity(taken);
       }
-      report(QObject::tr("Model space is empty: the %n entity(ies) of %1 are "
+      report(QObject::tr("Model space is empty: the %n object(s) of %1 are "
                          "shown in model space instead, and are saved there.",
                          "RS_FilterDXFRW", moved)
                  .arg(of));
@@ -5321,9 +5331,12 @@ void RS_FilterDXFRW::finishPaperSpaceImport() {
 
   // What stays on the layouts is neither shown nor lost.
   std::vector<std::pair<int, QString>> hiddenLayouts;
+  bool onOtherLayouts = false;
   for (const LC_PaperSpaceStore::Space &space : paperSpaces.spaces()) {
     if (countOf(*space.entities) == 0)
       continue;
+    if (!LC_PaperSpaceStore::isActivePaperSpaceName(space.name))
+      onOtherLayouts = true;
     const auto *layout = layoutOf(space);
     hiddenLayouts.emplace_back(layout != nullptr ? layout->tabOrder
                                                  : std::numeric_limits<int>::max(),
@@ -5336,11 +5349,21 @@ void RS_FilterDXFRW::finishPaperSpaceImport() {
   QStringList names;
   for (const auto &layout : hiddenLayouts)
     names << layout.second;
+  // Objects, not entities: what LibreCAD reads as one entity a file may hold
+  // as several records, and the other way round.
   const int hidden = static_cast<int>(paperSpaces.count());
-  if (hidden > 0) {
-    report(QObject::tr("%n entity(ies) on paper-space layouts (%1) are not "
+  if (hidden > 0 && !onOtherLayouts) {
+    // The active layout's paper space: every DWG and DXF version holds it.
+    report(QObject::tr("%n object(s) on paper-space layouts (%1) are not "
                        "shown in model space; they are kept and saved with "
-                       "the drawing as DXF.",
+                       "the drawing.",
+                       "RS_FilterDXFRW", hidden)
+               .arg(names.join(QStringLiteral(", "))));
+  } else if (hidden > 0) {
+    report(QObject::tr("%n object(s) on paper-space layouts (%1) are not "
+                       "shown in model space; they are kept and saved with "
+                       "the drawing as DWG or as DXF R2000 or later (a DXF "
+                       "R12 or R14 file holds the active layout only).",
                        "RS_FilterDXFRW", hidden)
                .arg(names.join(QStringLiteral(", "))));
   }
@@ -11822,6 +11845,7 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
   m_shapeLeftOut.clear();
   m_paperSpaceEntitiesLeftOut = 0;
   m_paperSpaceLeftOutReason.clear();
+  m_dxfLayoutDictionaryHandles.clear();
   m_shapeExportDirectory = QFileInfo(file).absoluteDir().canonicalPath();
   m_exportAttribScaleDataLeftOut = 0;
   // What becomes of each block attribute's text is the same for every
@@ -11922,10 +11946,10 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
         qScopeGuard([&stagedOutputPath] { QFile::remove(stagedOutputPath); });
     ExportWriterScope<dwgRW> activeWriter(
         m_dwgW, std::make_unique<dwgRW>(QFile::encodeName(stagedOutputPath).constData()));
-    // The layouts' entities stay behind (writtenPaperSpace()).
-    m_paperSpaceEntitiesLeftOut = g.paperSpaces().count();
-    m_paperSpaceLeftOutReason =
-        QObject::tr("a DWG save writes model space only", "RS_FilterDXFRW");
+    // The active layout's entities go to *Paper_Space, another's to its
+    // *Paper_SpaceN block (writtenPaperSpace()); what has no layout written
+    // is left out, and said to be.
+    notePaperSpacesLeftOut();
     prepareShapesForExport();
     if (m_writeFailed)
       return false;
@@ -12342,27 +12366,6 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
    */
   ExportWriterScope<dxfRW> activeWriter(
       m_dxfW, std::make_unique<dxfRW>(QFile::encodeName(file).constData()));
-  // A layout other than the active one needs a *Paper_SpaceN block: R2000
-  // and later only, for a layout the file keeps (writtenPaperSpace()).
-  for (const LC_PaperSpaceStore::Space &space : g.paperSpaces().spaces()) {
-    if (writtenPaperSpace(space.name) != nullptr)
-      continue;
-    for (const RS_Entity *entity : *space.entities) {
-      if (entity != nullptr && !entity->getFlag(RS2::FlagDeleted))
-        ++m_paperSpaceEntitiesLeftOut;
-    }
-  }
-  if (m_paperSpaceEntitiesLeftOut > 0) {
-    m_paperSpaceLeftOutReason =
-        m_version < 1015
-            ? QObject::tr("this DXF version holds the active layout only",
-                          "RS_FilterDXFRW")
-            : QObject::tr("their layouts are not written",
-                          "RS_FilterDXFRW");
-  }
-  prepareShapesForExport();
-  if (m_writeFailed)
-    return false;
   m_dxfBlockInsertHandles.clear();
   m_dxfExtraPaperSpaces.clear();
   m_dxfEmittedObjectHandles.clear();
@@ -12712,8 +12715,9 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
     // codec's 330/350 cross-refs are literals), so the colliding raw objects
     // are remapped to fresh allocator handles; writeRawDxfObject rewrites the
     // object's own handle AND every reference to a remapped handle, keeping
-    // the raw subtree internally consistent. 0xC/0xD raw dicts are suppressed
-    // (the codec regenerates root/group) and so are NOT remapped.
+    // the raw subtree internally consistent. The source's root and ACAD_GROUP
+    // dicts are suppressed (the codec regenerates them at C/D) and so are NOT
+    // remapped; another object at C or D is.
     static const std::set<std::uint32_t> kFixedStructural = {
         0x1,  0x2,  0x3,  0x5,  0x6,  0x7,  0x8,  0x9,  0xA,  0x10,
         0x12, 0x14, 0x15, 0x16, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21};
@@ -12759,10 +12763,15 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
     }
     std::map<std::uint32_t, std::uint32_t> handleRemap;
     bool remapFailed = false;
+    // The codec writes its root dictionary at C and ACAD_GROUP at D. The
+    // source's own two are suppressed (rebuilt there); anything else a source
+    // keeps at C or D -- ezdxf puts ACAD_GROUP at C and ACAD_LAYOUT at D --
+    // is an object of its own and moves like any other collision.
     auto remapIfColliding = [&](std::uint32_t h) {
-      if (h == 0 || kFixedStructural.count(h) == 0)
+      if (h == 0 ||
+          (kFixedStructural.count(h) == 0 && h != 0xCu && h != 0xDu))
         return;
-      if (h == 0xCu || h == 0xDu || m_dxfSuppressedObjectHandles.count(h) != 0)
+      if (h == sourceRootHandle || m_dxfSuppressedObjectHandles.count(h) != 0)
         return; // suppressed, not emitted -> nothing to remap
       if (remapFailed || handleRemap.count(h) != 0)
         return;
@@ -12812,10 +12821,16 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
     // a colliding named-dict handle adds is included in the codec's table.
 
     std::vector<std::pair<std::string, std::string>> rootEntries;
+    // Source handles of the dictionaries the root lists in the file written:
+    // a dictionary it does not list is unreachable, whatever it holds.
+    std::set<std::uint32_t> attachedToRoot;
     for (const DRW_RawDxfObject &o : metadata.rawDxfObjects()) {
       if (o.name != "DICTIONARY" && o.name != "ACDBDICTIONARYWDFLT")
         continue;
-      if (o.handle == 0xCu || o.handle == 0xDu) { // collide with fixed C/D
+      // The source's root and ACAD_GROUP dictionaries are rebuilt by the
+      // codec (at C and D); another dictionary is written, under its own
+      // handle or, at C or D, under the one remapIfColliding() gave it.
+      if (o.handle == sourceRootHandle) {
         m_dxfSuppressedObjectHandles.insert(o.handle);
         continue;
       }
@@ -12837,8 +12852,10 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
       auto rm = handleRemap.find(o.handle);
       if (rm != handleRemap.end())
         handleStr = m_dxfW->toHexStrHandle(rm->second);
-      if (!handleStr.empty())
+      if (!handleStr.empty()) {
         rootEntries.emplace_back(it->second, handleStr);
+        attachedToRoot.insert(o.handle);
+      }
     }
 
     // (3b) F4-followup: DWG->DXF parent dictionaries for the data-only
@@ -12919,7 +12936,7 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
     for (const auto &d : metadata.dictionaries()) {
       if (d.parentHandle == 0)
         continue; // source root: harvested for names only
-      if (d.handle == 0 || d.handle == 0xCu || d.handle == 0xDu)
+      if (d.handle == 0 || d.handle == sourceRootHandle)
         continue;
       if (d.handle == acadGroupHandle)
         continue;
@@ -12973,9 +12990,22 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
       std::string entryName = nameIt != rootEntryName.end()
                                   ? nameIt->second
                                   : (!d.name.empty() ? d.name : std::string());
-      if (!entryName.empty())
+      // The dictionary of the layouts, when the source's root does not name
+      // it (LibreCAD's own DWG lists only ACAD_GROUP there), is ACAD_LAYOUT:
+      // a reader looks for layouts there and nowhere else.
+      const auto ownsLayouts = std::any_of(
+          metadata.layouts().cbegin(), metadata.layouts().cend(),
+          [&d](const auto &layout) { return layout.parentHandle == d.handle; });
+      const auto layoutsNamed = std::any_of(
+          rootEntries.cbegin(), rootEntries.cend(),
+          [](const auto &entry) { return entry.first == "ACAD_LAYOUT"; });
+      if (entryName.empty() && ownsLayouts && !layoutsNamed)
+        entryName = "ACAD_LAYOUT";
+      if (!entryName.empty()) {
         rootEntries.emplace_back(entryName,
                                  m_dxfW->toHexStrHandle(remapOf(d.handle)));
+        attachedToRoot.insert(d.handle);
+      }
     }
     if (!namedDicts.empty())
       m_dxfW->setNamedDictObjects(namedDicts);
@@ -13031,7 +13061,22 @@ bool RS_FilterDXFRW::fileExport(RS_Graphic &g, const QString &file,
 
     if (!rootEntries.empty())
       m_dxfW->setRootDictEntries(rootEntries);
+
+    // The dictionaries that hold layouts in the file written, listed by its
+    // root: a layout no such dictionary lists is an orphan, and so would be
+    // the *Paper_SpaceN block holding its entities (dxfExtraPaperSpaceNames()).
+    for (const auto &layout : metadata.layouts()) {
+      if (attachedToRoot.count(layout.parentHandle) != 0)
+        m_dxfLayoutDictionaryHandles.insert(layout.parentHandle);
+    }
   }
+
+  // A layout other than the active one needs a *Paper_SpaceN block: R2000
+  // and later only, for a layout the file keeps (writtenPaperSpace()).
+  notePaperSpacesLeftOut();
+  prepareShapesForExport();
+  if (m_writeFailed)
+    return false;
 
   //    bool success = m_dxfW->write(this, exportVersion, false); //ascii
   const bool success =
@@ -13417,11 +13462,18 @@ void RS_FilterDXFRW::writeBlockRecords() {
     noteDxfWrite(m_dxfW->writeBlockRecord(name, 0, {}, {}));
 }
 
-std::vector<std::string> RS_FilterDXFRW::dxfExtraPaperSpaceNames() const {
-  std::vector<std::string> names;
-  if (m_version < 1015) // LAYOUT objects are R2000 and later
-    return names;
-  const auto &metadata = m_graphic->dwgAdvancedMetadata();
+namespace {
+// The layouts whose paper space is a numbered one (*Paper_Space0, ...), with
+// the name of that block record, that a save of @p version (a DXF or DWG
+// version number, 1009 to 1032) writes: LAYOUT objects are R2000 and later,
+// and only a layout whose record is written keeps its paper space.
+std::vector<std::pair<std::string, const LC_DwgAdvancedMetadata::LayoutRecord *>>
+numberedLayoutSpaces(const RS_Graphic &graphic, const int version) {
+  std::vector<std::pair<std::string, const LC_DwgAdvancedMetadata::LayoutRecord *>>
+      layouts;
+  if (version < 1015)
+    return layouts;
+  const auto &metadata = graphic.dwgAdvancedMetadata();
   const auto &spaces = metadata.spaceBlockRecords();
   std::set<std::string> seen;
   for (const auto &layout : metadata.layouts()) {
@@ -13432,36 +13484,156 @@ std::vector<std::string> RS_FilterDXFRW::dxfExtraPaperSpaceNames() const {
     if (space == spaces.end())
       continue;
     const QString name = QString::fromUtf8(space->second.c_str());
-    static const QRegularExpression numbered(
-        QStringLiteral("^\\*paper_space\\d+$"),
-        QRegularExpression::CaseInsensitiveOption);
-    if (numbered.match(name).hasMatch() &&
+    if (LC_PaperSpaceStore::isPaperSpaceName(name) &&
+        !LC_PaperSpaceStore::isActivePaperSpaceName(name) &&
         seen.insert(name.toLower().toStdString()).second)
-      names.push_back(space->second);
+      layouts.emplace_back(space->second, &layout);
+  }
+  return layouts;
+}
+
+// The DWG or DXF version number a save in @p format writes, 0 for a format
+// of neither.
+int writtenVersionOf(const RS2::FormatType format) {
+  switch (format) {
+  case RS2::FormatDXFRW12:
+    return 1009;
+  case RS2::FormatDXFRW14:
+    return 1014;
+  case RS2::FormatDXFRW2000:
+  case RS2::FormatDWG:
+    return 1015;
+  case RS2::FormatDXFRW2004:
+  case RS2::FormatDWG2004:
+    return 1018;
+  case RS2::FormatDXFRW:
+  case RS2::FormatDWG2007:
+    return 1021;
+  case RS2::FormatDXFRW2010:
+  case RS2::FormatDWG2010:
+    return 1024;
+  case RS2::FormatDXFRW2013:
+  case RS2::FormatDWG2013:
+    return 1027;
+  case RS2::FormatDXFRW2018:
+  case RS2::FormatDWG2018:
+    return 1032;
+  default:
+    return 0;
+  }
+}
+} // namespace
+
+std::vector<std::string> RS_FilterDXFRW::dxfExtraPaperSpaceNames() const {
+  std::vector<std::string> names;
+  if (m_graphic == nullptr)
+    return names;
+  for (const auto &[name, layout] : numberedLayoutSpaces(*m_graphic, m_version)) {
+    // A DXF lists its layouts in a dictionary. A *Paper_SpaceN block whose
+    // layout no written dictionary lists is an orphan, which a reader drops
+    // with its content: the layout is left out instead, and said to be.
+    if (m_dxfW != nullptr &&
+        m_dxfLayoutDictionaryHandles.count(layout->parentHandle) == 0)
+      continue;
+    names.push_back(name);
   }
   return names;
 }
 
 RS_EntityContainer *
 RS_FilterDXFRW::writtenPaperSpace(const QString &name) const {
-  // The native DWG writer places nothing in a paper space: a DWG save keeps
-  // model space only (fileExport() reports what it leaves out).
-  if (m_dxfW == nullptr || m_graphic == nullptr)
+  bool writing = m_dxfW != nullptr;
+#ifdef DWGSUPPORT
+  writing = writing || m_dwgW != nullptr;
+#endif
+  if (!writing || m_graphic == nullptr)
     return nullptr;
   const LC_PaperSpaceStore::Space *space = m_graphic->paperSpaces().find(name);
   if (space == nullptr)
     return nullptr;
-  // The active layout's entities go to ENTITIES, as in every DXF version.
+  // The active layout's entities go to the paper space every version has:
+  // a DXF's ENTITIES with group 67, a DWG's *Paper_Space.
   if (LC_PaperSpaceStore::isActivePaperSpaceName(space->name))
     return space->entities.get();
-  // Another layout's go to its *Paper_SpaceN block, which a DXF holds from
-  // R2000 on, for a layout it writes.
+  // Another layout's go to its *Paper_SpaceN block, which a DXF or a DWG
+  // holds from R2000 on, for a layout it writes.
   for (const std::string &extra : dxfExtraPaperSpaceNames()) {
     if (QString::fromUtf8(extra.c_str())
             .compare(space->name, Qt::CaseInsensitive) == 0)
       return space->entities.get();
   }
   return nullptr;
+}
+
+void RS_FilterDXFRW::notePaperSpacesLeftOut() {
+  m_paperSpaceEntitiesLeftOut = 0;
+  m_paperSpaceLeftOutReason.clear();
+  if (m_graphic == nullptr)
+    return;
+  for (const LC_PaperSpaceStore::Space &space :
+       m_graphic->paperSpaces().spaces()) {
+    if (writtenPaperSpace(space.name) != nullptr)
+      continue;
+    for (const RS_Entity *entity : *space.entities) {
+      if (entity != nullptr && !entity->getFlag(RS2::FlagDeleted))
+        ++m_paperSpaceEntitiesLeftOut;
+    }
+  }
+  if (m_paperSpaceEntitiesLeftOut > 0) {
+    m_paperSpaceLeftOutReason =
+        m_dxfW != nullptr && m_version < 1015
+            ? QObject::tr("this DXF version holds the active layout only",
+                          "RS_FilterDXFRW")
+            : QObject::tr("their layouts could not be written",
+                          "RS_FilterDXFRW");
+  }
+}
+
+QString RS_FilterDXFRW::exportLeavesOut(const RS_Graphic &graphic,
+                                        const RS2::FormatType type) const {
+  // What notePaperSpacesLeftOut() will find, told before the save: the
+  // layouts other than the active one that this version does not keep. (A
+  // DXF save also leaves out a layout whose dictionary it cannot write; it
+  // says so once done.)
+  const int version = writtenVersionOf(type);
+  if (version == 0)
+    return {};
+  const auto &metadata = graphic.dwgAdvancedMetadata();
+  std::set<QString> kept;
+  for (const auto &[name, layout] : numberedLayoutSpaces(graphic, version))
+    kept.insert(QString::fromUtf8(name.c_str()).toLower());
+  unsigned leftOut = 0;
+  QStringList layouts;
+  for (const LC_PaperSpaceStore::Space &space : graphic.paperSpaces().spaces()) {
+    if (LC_PaperSpaceStore::isActivePaperSpaceName(space.name) ||
+        kept.count(space.name.toLower()) != 0)
+      continue;
+    unsigned objects = 0;
+    for (const RS_Entity *entity : *space.entities) {
+      if (entity != nullptr && !entity->getFlag(RS2::FlagDeleted))
+        ++objects;
+    }
+    if (objects == 0)
+      continue;
+    leftOut += objects;
+    QString layoutName = space.name;
+    for (const auto &layout : metadata.layouts()) {
+      const auto record =
+          metadata.spaceBlockRecords().find(layout.paperSpaceBlockRecordHandle);
+      if (record != metadata.spaceBlockRecords().end() && !layout.name.empty() &&
+          QString::fromUtf8(record->second.c_str())
+                  .compare(space.name, Qt::CaseInsensitive) == 0) {
+        layoutName = QString::fromUtf8(layout.name.c_str());
+        break;
+      }
+    }
+    layouts << layoutName;
+  }
+  if (leftOut == 0)
+    return {};
+  return QObject::tr("%n object(s) on paper-space layouts (%1)", "RS_FilterDXFRW",
+                     static_cast<int>(leftOut))
+      .arg(layouts.join(QStringLiteral(", ")));
 }
 
 std::vector<RS_EntityContainer *> RS_FilterDXFRW::writtenPaperSpaces() const {
@@ -13590,6 +13762,35 @@ void RS_FilterDXFRW::writeBlocks() {
       blockHandles.emplace_back(blk, handle);
     }
 
+    // A layout other than the active one keeps its entities in its own
+    // *Paper_SpaceN block record, which its LAYOUT names: the source record
+    // follows it there.
+    std::vector<std::pair<RS_EntityContainer *, std::uint32_t>> paperSpaceHandles;
+    for (const DwgPaperSpaceBlock &space : dwgPaperSpaceBlocks()) {
+      const std::uint32_t handle =
+          m_dwgW->defineBlock(space.name, DRW_Coord{0.0, 0.0, 0.0}, 0);
+      if (handle == 0 ||
+          !bindDwgWriteBlockName(normalizeDwgTableName(space.name), handle)) {
+        m_writeFailed = true;
+        continue;
+      }
+      if (space.sourceHandle != 0) {
+        noteDwgWriteSourceKind(
+            space.sourceHandle,
+            RS_FilterDXFRW_DwgWriteIdentityRegistry::DwgWriteSourceKind::Block);
+        if (!selectDwgWriteIdentity(RS_FilterDXFRW_DwgWriteIdentityRegistry::
+                                        DwgWriteSourceKind::Block,
+                                    space.sourceHandle, handle)) {
+          m_writeFailed = true;
+          continue;
+        }
+        if (!m_dwgWriteBlockHandleRemap.emplace(space.sourceHandle, handle)
+                 .second)
+          m_dwgWriteDuplicateBlockHandles.insert(space.sourceHandle);
+      }
+      paperSpaceHandles.emplace_back(space.entities, handle);
+    }
+
     if (m_writeFailed) {
       rollbackBlockPhase();
       return;
@@ -13627,6 +13828,18 @@ void RS_FilterDXFRW::writeBlocks() {
       }
       const bool ended = m_dwgW->endBlockContent();
       if (!ended || m_writeFailed) {
+        rollbackBlockPhase();
+        return;
+      }
+    }
+
+    for (const auto &[paperSpace, handle] : paperSpaceHandles) {
+      if (!m_dwgW->beginBlockContent(handle)) {
+        rollbackBlockPhase();
+        return;
+      }
+      writePaperSpaceEntities(paperSpace);
+      if (m_writeFailed || !m_dwgW->endBlockContent() || m_writeFailed) {
         rollbackBlockPhase();
         return;
       }
@@ -13693,6 +13906,106 @@ void RS_FilterDXFRW::writeBlocks() {
     block.name = name;
     noteDxfWrite(m_dxfW->writeBlock(&block));
     writePaperSpaceEntities(writtenPaperSpace(QString::fromUtf8(name.c_str())));
+    writeDxfShapes(name);
+    writeDxfOleFrames(QString::fromUtf8(name.c_str()));
+  }
+}
+
+std::vector<RS_FilterDXFRW::DwgPaperSpaceBlock>
+RS_FilterDXFRW::dwgPaperSpaceBlocks() const {
+  std::vector<DwgPaperSpaceBlock> blocks;
+#ifdef DWGSUPPORT
+  if (m_dwgW == nullptr || m_graphic == nullptr)
+    return blocks;
+  for (const auto &[name, layout] : numberedLayoutSpaces(*m_graphic, m_version)) {
+    // The store has no container for a layout that holds nothing; its
+    // record is written all the same, empty.
+    RS_EntityContainer *entities =
+        writtenPaperSpace(QString::fromUtf8(name.c_str()));
+    blocks.push_back({name, layout->paperSpaceBlockRecordHandle, entities});
+  }
+#endif
+  return blocks;
+}
+
+QString RS_FilterDXFRW::paperSpaceOf(const std::uint32_t parentHandle,
+                                     const DRW::Space space) const {
+  if (m_graphic != nullptr) {
+    const auto &records = m_graphic->dwgAdvancedMetadata().spaceBlockRecords();
+    const auto record = records.find(parentHandle);
+    if (parentHandle != 0 && record != records.end()) {
+      const QString name = QString::fromUtf8(record->second.c_str());
+      if (LC_PaperSpaceStore::isActivePaperSpaceName(name))
+        return LC_PaperSpaceStore::activeName();
+      if (LC_PaperSpaceStore::isPaperSpaceName(name))
+        return name;
+      return {};
+    }
+  }
+  return space == DRW::PaperSpace ? LC_PaperSpaceStore::activeName() : QString();
+}
+
+void RS_FilterDXFRW::writeDxfOleFrames(const QString &paperSpace) {
+  if (m_dxfW == nullptr || m_graphic == nullptr)
+    return;
+  const auto &metadata = m_graphic->dwgAdvancedMetadata();
+  // Where a frame read on a layout goes: the active layout's into ENTITIES
+  // with group 67, another's into its *Paper_SpaceN block; a layout this
+  // file does not keep leaves its frames out, which the save reports.
+  const auto placed = [this, &paperSpace](std::uint32_t parentHandle,
+                                          DRW::Space space,
+                                          DRW_Entity &frame) {
+    const QString of = paperSpaceOf(parentHandle, space);
+    if (of.isEmpty()) {
+      // Model space or a block: as read.
+      return paperSpace.isEmpty();
+    }
+    if (writtenPaperSpace(of) == nullptr) {
+      if (paperSpace.isEmpty())
+        ++m_shapeLeftOut["OLE frame on a layout that is not written"];
+      return false;
+    }
+    const bool active = LC_PaperSpaceStore::isActivePaperSpaceName(of);
+    if (active ? !paperSpace.isEmpty()
+               : of.compare(paperSpace, Qt::CaseInsensitive) != 0)
+      return false;
+    frame.parentHandle = DRW::NoHandle;
+    frame.space = DRW::PaperSpace;
+    return true;
+  };
+  // OLE2FRAME entities read from a DWG live only on the metadata shelf ->
+  // re-emit as typed AcDbOle2Frame. pt1/pt2 (frame rectangle) were decoded
+  // from the OLE payload header on read; the opaque payload is replayed
+  // verbatim (group 310).
+  for (const auto &rec : metadata.ole2Frames()) {
+    if (rec.payloadBytes.empty())
+      continue; // nothing to preserve (truncated/absent payload)
+    DRW_Ole2Frame ole;
+    ole.handle = rec.handle;
+    ole.parentHandle = rec.parentHandle;
+    ole.m_flags = rec.flags;
+    ole.m_mode = rec.mode;
+    ole.m_lockAspect = rec.lockAspect;
+    ole.m_oleVersion = rec.oleVersion;
+    ole.m_pt1 = rec.pt1;
+    ole.m_pt2 = rec.pt2;
+    ole.m_payloadBytes = rec.payloadBytes;
+    if (placed(rec.parentHandle, rec.space, ole))
+      noteDxfWrite(m_dxfW->writeOle2Frame(&ole));
+  }
+  // Legacy OLEFRAME entities carry no frame rectangle; preserve their
+  // bounded status and opaque payload as the original DXF entity.
+  for (const auto &rec : metadata.oleFrames()) {
+    if (rec.payloadTruncated || rec.payloadTooLarge)
+      continue;
+    DRW_OleFrame ole;
+    ole.handle = rec.handle;
+    ole.parentHandle = rec.parentHandle;
+    ole.m_flags = rec.flags;
+    ole.m_mode = rec.mode;
+    ole.m_payloadBytes = rec.payloadBytes;
+    if (placed(rec.parentHandle, rec.space, ole))
+      noteDxfWrite(m_dxfW->writeOleFrame(&ole));
   }
 }
 
@@ -16245,7 +16558,10 @@ void RS_FilterDXFRW::prepareDwgEntityHandleMap() {
   reserveContainerEntities(m_graphic, DRW::DwgModelSpaceBlockRecordHandle, {});
   if (m_writeFailed)
     return;
-  reserveContainerEntities(nullptr, DRW::DwgPaperSpaceBlockRecordHandle, {});
+  // The active layout's entities go to *Paper_Space.
+  reserveContainerEntities(
+      writtenPaperSpace(LC_PaperSpaceStore::activeName()),
+      DRW::DwgPaperSpaceBlockRecordHandle, {});
   if (m_writeFailed)
     return;
   for (unsigned i = 0; i < m_graphic->countBlocks(); ++i) {
@@ -16254,6 +16570,13 @@ void RS_FilterDXFRW::prepareDwgEntityHandleMap() {
       reserveContainerEntities(
           block, block->sourceHandle(),
           normalizeDwgTableName(block->getName().toUtf8().toStdString()));
+    if (m_writeFailed)
+      return;
+  }
+  // Another layout's go to its *Paper_SpaceN block (writeBlocks()).
+  for (const DwgPaperSpaceBlock &space : dwgPaperSpaceBlocks()) {
+    reserveContainerEntities(space.entities, space.sourceHandle,
+                             normalizeDwgTableName(space.name));
     if (m_writeFailed)
       return;
   }
@@ -16354,6 +16677,8 @@ bool RS_FilterDXFRW::prepareDwgExportAdmissionPlan() {
     if (block != nullptr && !block->isDeleted())
       collectInserts(block);
   }
+  for (const RS_EntityContainer *paperSpace : writtenPaperSpaces())
+    collectInserts(paperSpace);
   plan.insertRecordIndexes = std::move(insertRecordIndexes);
 
   std::size_t wipeoutOrdinal = 0;
@@ -16397,6 +16722,8 @@ bool RS_FilterDXFRW::prepareDwgExportAdmissionPlan() {
     if (block != nullptr && !block->isDeleted())
       collectWipeouts(block);
   }
+  for (const RS_EntityContainer *paperSpace : writtenPaperSpaces())
+    collectWipeouts(paperSpace);
   plan.wipeoutRecordIndexes = std::move(wipeoutRecordIndexes);
 
   struct RawPlotSettingsCandidate {
@@ -17348,7 +17675,7 @@ QString RS_FilterDXFRW::exportReport() const {
                  .arg(m_exportAttribScaleDataLeftOut);
   }
   if (m_paperSpaceEntitiesLeftOut > 0) {
-    lines << QObject::tr("%n entity(ies) on paper-space layouts (%1)",
+    lines << QObject::tr("%n object(s) on paper-space layouts (%1)",
                          "RS_FilterDXFRW",
                          static_cast<int>(m_paperSpaceEntitiesLeftOut))
                  .arg(m_paperSpaceLeftOutReason);
@@ -18309,6 +18636,11 @@ bool RS_FilterDXFRW::prepareDwgEntityWritePlans() {
       return false;
     }
   }
+  // The layouts' entities are written as those of model space.
+  for (RS_EntityContainer *paperSpace : writtenPaperSpaces()) {
+    if (!inspect(paperSpace, /*reconstructsSidecars=*/true))
+      return false;
+  }
   return true;
 }
 
@@ -18711,6 +19043,10 @@ void RS_FilterDXFRW::writeDwgClasses() {
     for (unsigned i = 0; i < m_graphic->countBlocks(); ++i) {
       RS_Block *block = m_graphic->blockAt(i);
       if (block != nullptr && !block->isDeleted() && !inspect(block))
+        return false;
+    }
+    for (RS_EntityContainer *paperSpace : writtenPaperSpaces()) {
+      if (!inspect(paperSpace))
         return false;
     }
     return true;
@@ -27617,6 +27953,8 @@ void RS_FilterDXFRW::collectDwgAppIds() {
   collectFromContainer(m_graphic);
   for (unsigned index = 0; index < m_graphic->countBlocks(); ++index)
     collectFromContainer(m_graphic->blockAt(index));
+  for (const RS_EntityContainer *paperSpace : writtenPaperSpaces())
+    collectFromContainer(paperSpace);
 
   const auto &metadata = m_graphic->dwgAdvancedMetadata();
   for (const auto &record : metadata.visualStyles()) {
@@ -28567,11 +28905,21 @@ void RS_FilterDXFRW::prepareShapesForExport() {
       bool blockFound = ownerBlockName.empty();
       const auto space = metadata.spaceBlockRecords().find(shape.parentHandle);
       if (space != metadata.spaceBlockRecords().end()) {
-        const std::string name = normalizeDwgTableName(space->second);
-        if (name == "*MODEL_SPACE")
+        const QString spaceName = QString::fromUtf8(space->second.c_str());
+        if (LC_PaperSpaceStore::isModelSpaceName(spaceName))
           shape.parentHandle = DRW::DwgModelSpaceBlockRecordHandle;
-        else if (name == "*PAPER_SPACE")
+        else if (LC_PaperSpaceStore::isActivePaperSpaceName(spaceName))
           shape.parentHandle = DRW::DwgPaperSpaceBlockRecordHandle;
+        else if (LC_PaperSpaceStore::isPaperSpaceName(spaceName)) {
+          // Another layout's: into its *Paper_SpaceN block, which keeps the
+          // source record's handle, if the file keeps that layout.
+          if (writtenPaperSpace(spaceName) == nullptr) {
+            ++m_shapeLeftOut["SHAPE on a layout that is not written"];
+            continue;
+          }
+          ownerBlockName = space->second;
+          shape.space = DRW::PaperSpace;
+        }
       }
       // A source space handle may normalize to an unrelated block's source
       // handle. Match ordinary blocks only while still in source identity.
@@ -29033,38 +29381,9 @@ void RS_FilterDXFRW::writeEntities() {
         noteDxfWrite(m_dxfW->writeLight(&light));
       }
     }
-    // OLE2FRAME entities read from a DWG live only on the metadata shelf ->
-    // re-emit as typed AcDbOle2Frame. pt1/pt2 (frame rectangle) were decoded
-    // from the OLE payload header on read; the opaque payload is replayed
-    // verbatim (group 310).
-    for (const auto &rec : m_graphic->dwgAdvancedMetadata().ole2Frames()) {
-      if (rec.payloadBytes.empty())
-        continue; // nothing to preserve (truncated/absent payload)
-      DRW_Ole2Frame ole;
-      ole.handle = rec.handle;
-      ole.parentHandle = rec.parentHandle;
-      ole.m_flags = rec.flags;
-      ole.m_mode = rec.mode;
-      ole.m_lockAspect = rec.lockAspect;
-      ole.m_oleVersion = rec.oleVersion;
-      ole.m_pt1 = rec.pt1;
-      ole.m_pt2 = rec.pt2;
-      ole.m_payloadBytes = rec.payloadBytes;
-      noteDxfWrite(m_dxfW->writeOle2Frame(&ole));
-    }
-    // Legacy OLEFRAME entities carry no frame rectangle; preserve their
-    // bounded status and opaque payload as the original DXF entity.
-    for (const auto &rec : m_graphic->dwgAdvancedMetadata().oleFrames()) {
-      if (rec.payloadTruncated || rec.payloadTooLarge)
-        continue;
-      DRW_OleFrame ole;
-      ole.handle = rec.handle;
-      ole.parentHandle = rec.parentHandle;
-      ole.m_flags = rec.flags;
-      ole.m_mode = rec.mode;
-      ole.m_payloadBytes = rec.payloadBytes;
-      noteDxfWrite(m_dxfW->writeOleFrame(&ole));
-    }
+    // OLE2FRAME and OLEFRAME: those of model space, and of the active
+    // layout (writeBlocks() writes another layout's).
+    writeDxfOleFrames({});
   }
 
   if (m_dxfW != nullptr)

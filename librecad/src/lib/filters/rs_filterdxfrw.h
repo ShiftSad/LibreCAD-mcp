@@ -2016,6 +2016,8 @@ public:
   // Error messages
   QString lastError() const override;
   QString exportReport() const override;
+  QString exportLeavesOut(const RS_Graphic &graphic,
+                          RS2::FormatType type) const override;
 
 #ifdef DWGSUPPORT
   // Snapshot of the current DWG admission attempt for the explicit-path
@@ -2327,12 +2329,32 @@ public:
   void setEntityAttributes(RS_Entity *entity, const DRW_Entity *attrib);
   void getEntityAttributes(DRW_Entity *ent, const RS_Entity *entity);
   std::uint32_t dxfReference(std::uint32_t source) const;
-  /** Numbered paper spaces (*Paper_Space0, ...) the written layouts need. */
+  /** Numbered paper spaces (*Paper_Space0, ...) the written layouts need,
+   *  in a DXF or a DWG. */
   std::vector<std::string> dxfExtraPaperSpaceNames() const;
   /** The entities of the layout whose paper space is named @p name, when the
-   *  save in progress writes them: the active layout's into ENTITIES with
-   *  group 67, another's into its *Paper_SpaceN block. Else nullptr. */
+   *  save in progress writes them: the active layout's into a DXF's ENTITIES
+   *  with group 67 or a DWG's *Paper_Space, another's into its
+   *  *Paper_SpaceN block. Else nullptr. */
   RS_EntityContainer *writtenPaperSpace(const QString &name) const;
+  /** Counts what the save in progress leaves out of the layouts, and why. */
+  void notePaperSpacesLeftOut();
+  /** A numbered paper space a DWG save writes as a block of its own. */
+  struct DwgPaperSpaceBlock {
+    std::string name;
+    /** The source block record, which the layout's LAYOUT names. */
+    std::uint32_t sourceHandle = 0;
+    /** Its entities; nullptr for a layout that holds none. */
+    RS_EntityContainer *entities = nullptr;
+  };
+  std::vector<DwgPaperSpaceBlock> dwgPaperSpaceBlocks() const;
+  /** The paper space an object read with owner @p parentHandle and space
+   *  @p space belongs to ("*Paper_Space" for the active layout's), or an
+   *  empty string for model space or a block. */
+  QString paperSpaceOf(std::uint32_t parentHandle, DRW::Space space) const;
+  /** Writes the OLE frames of @p paperSpace, or with an empty name those of
+   *  model space and of the active layout (ENTITIES). */
+  void writeDxfOleFrames(const QString &paperSpace);
   /** The containers of every layout the save in progress writes. */
   std::vector<RS_EntityContainer *> writtenPaperSpaces() const;
   /** Writes the entities of a layout's paper space as those of model space. */
@@ -3285,6 +3307,9 @@ private:
   InsertAttribPlan m_insertAttribPlan;
   /** Numbered paper spaces written, empty, for the layouts naming them. */
   std::vector<std::string> m_dxfExtraPaperSpaces;
+  /** Source handles of the dictionaries that hold layouts in the DXF being
+   *  written; a layout no such dictionary lists keeps no *Paper_SpaceN. */
+  std::set<std::uint32_t> m_dxfLayoutDictionaryHandles;
   /** Source handles of the objects the DXF being written holds. */
   std::set<std::uint32_t> m_dxfEmittedObjectHandles;
   QHash<QString, QString> m_fontList;
