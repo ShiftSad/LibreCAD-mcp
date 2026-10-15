@@ -50,8 +50,13 @@ public:
      * - 403 path_not_allowed (+path): a UNC, \\?\ or device path while
      *   AllowNetworkPaths is off, or outside every AllowedRoots folder (after
      *   resolving symbolic links and, on Windows, junctions and mount points);
-     * - 422 extension_mismatch (+path, +allowed): extensions is not empty and
-     *   the file's extension (".dxf", compared case-insensitively) is not in it;
+     * - 400 bad_path (+path): a reserved Windows device name ("COM1.dxf",
+     *   "COM\u00b9.dxf", "nul.svg"), in the path or in the name of the existing
+     *   file it reaches;
+     * - 422 extension_mismatch (+path, +allowed, +resolved?): extensions is not
+     *   empty and the file's extension (".dxf", compared case-insensitively) is
+     *   not in it; for an existing file, the extension of its own name too (an
+     *   8.3 alias or a symbolic link names another file, given in resolved);
      * - Read: 404 file_not_found (+path);
      * - Write: 400 bad_path when the parent folder does not exist, and
      *   409 file_exists (+path) when the file exists and overwrite is false.
@@ -61,7 +66,12 @@ public:
 
     /** Whether path names a network share or device: \\host, //host, \\?\, \\.\ */
     static bool isNetworkPath(const QString& path);
-    /** Whether two paths name the same file (canonical when they exist; case-insensitive on Windows). */
+    /**
+     * Whether two paths name the same file: when both exist, the same file on
+     * disk (volume and file id: a junction, a symbolic link, an 8.3 alias or a
+     * hard link leads to it as well); otherwise the same name once every link
+     * on the way is resolved (case-insensitive on Windows).
+     */
     static bool sameFile(const QString& a, const QString& b);
 
 private:

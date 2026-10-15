@@ -139,6 +139,36 @@ def test_a_stale_discovery_file_is_never_used(monkeypatch):
     assert "secret-token" not in msg
 
 
+def test_a_reused_pid_makes_the_file_stale():
+    # LibreCAD was killed and another program got its pid: the file is still stale.
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        p = put_default_discovery({"url": "http://127.0.0.1:13140", "token": "secret-token", "pid": other.pid,
+                                   "app": "LibreCAD", "started_at": "2026-01-01T00:00:00Z"})
+        with pytest.raises(ConfigError) as exc:
+            load_config()
+        msg = str(exc.value)
+        assert "pid was reused" in msg and str(p) in msg and "secret-token" not in msg
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_a_process_younger_than_the_file_did_not_write_it():
+    from datetime import datetime, timedelta, timezone
+    from librecad_mcp.discovery import stale_reason
+    long_ago = "2000-01-01T00:00:00Z"
+    assert "started after" in stale_reason({"pid": os.getpid(), "started_at": long_ago})
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert stale_reason({"pid": os.getpid(), "started_at": now}) is None
+    later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    assert stale_reason({"pid": os.getpid(), "started_at": later}) is None
+    # a file LibreCAD wrote names a LibreCAD process; this test runs in python
+    assert "not LibreCAD" in stale_reason({"pid": os.getpid(), "app": "LibreCAD", "started_at": now})
+    # an unreadable started_at is not judged
+    assert stale_reason({"pid": os.getpid(), "started_at": "yesterday"}) is None
+
+
 def test_a_stale_discovery_file_only_lends_no_port(monkeypatch):
     put_default_discovery({"url": "http://127.0.0.1:13999", "token": "from-file", "pid": _dead_pid()})
     monkeypatch.setenv("LIBRECAD_API_TOKEN", "from-env")

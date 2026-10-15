@@ -39,11 +39,11 @@
 // How a task travels (design section 1.2):
 //
 //   server thread                          GUI thread
-//   run(): post Task, wait on its future   execute(): gate on depth and on the
-//          in 20 ms slices                            user's nested loops, refuse
-//          timeout -> abandon -> 504                  on a user modal, then run fn
-//          abortWaiting() -> 503                      inside a ModalGuard
-//          client gone -> abandon
+//   run(): post Task, wait on its future   execute(): gate on depth, refuse on
+//          in 20 ms slices                            a user modal, gate on the
+//          timeout -> abandon -> 504                  user's busy code and nested
+//          abortWaiting() -> 503                      loops, then run fn inside a
+//          client gone -> abandon                     ModalGuard
 //
 // A task's state moves Pending -> Started -> Done on the GUI side. The waiting
 // side abandons it with a compare-and-swap: from Pending (the function never
@@ -81,9 +81,9 @@ bool isGuiThread() {
     return app == nullptr || QThread::currentThread() == app->thread();
 }
 
-QWidget* userModalWidget(const LC_RemoteApiGui::ModalPolicy policy) {
-    if (policy == LC_RemoteApiGui::ModalPolicy::Allow ||
-        qobject_cast<QApplication*>(QCoreApplication::instance()) == nullptr) {
+// The modal dialog the user has open, if any.
+QWidget* userModalWidget() {
+    if (qobject_cast<QApplication*>(QCoreApplication::instance()) == nullptr) {
         return nullptr;
     }
     return QApplication::activeModalWidget();
@@ -150,21 +150,28 @@ void execute(const std::shared_ptr<Task>& task) {
         return; // abandoned before it started: it never runs
     }
     // Re-entrancy gate (the reference's F8): a task posted while another API
-    // task, or user code marked with a UserBusyScope, pumps events in a nested
-    // loop waits until that one has finished.
-    if (s_depth > 0 || s_userBusy > 0) {
+    // task pumps events in a nested loop waits until that one has finished.
+    if (s_depth > 0) {
         repost(task);
         return;
     }
-    if (const QWidget* modal = userModalWidget(task->modalPolicy)) {
-        int expected = Pending;
-        if (task->state.compare_exchange_strong(expected, Done)) {
-            task->promise.set_value(modalRefusal(modal));
+    const bool refuseModal = task->modalPolicy == LC_RemoteApiGui::ModalPolicy::Refuse;
+    if (const QWidget* modal = userModalWidget()) {
+        // The user has a dialog open, perhaps from inside their own action (a
+        // UserBusyScope: "Save changes?" while closing): refused at once, so the
+        // client hears why; read-only status runs, while the user's code waits
+        // in the dialog.
+        if (refuseModal) {
+            int expected = Pending;
+            if (task->state.compare_exchange_strong(expected, Done)) {
+                task->promise.set_value(modalRefusal(modal));
+            }
+            return;
         }
-        return;
     }
-    // a popup menu or a drag: wait until the user is done with it
-    if (task->modalPolicy == LC_RemoteApiGui::ModalPolicy::Refuse && insideUserLoop()) {
+    else if (s_userBusy > 0 || (refuseModal && insideUserLoop())) {
+        // user code that pumps events (a UserBusyScope), a popup menu or a
+        // drag: wait until the user is done with it
         repost(task);
         return;
     }
@@ -216,7 +223,7 @@ LC_ApiResponse run(std::function<LC_ApiResponse()> fn, const int timeoutMs, cons
     if (isGuiThread()) {
         // Already on the GUI thread (tests, or a caller that is): posting and
         // waiting would deadlock, so run it here, without the gate.
-        if (const QWidget* modal = userModalWidget(modalPolicy)) {
+        if (const QWidget* modal = userModalWidget(); modal != nullptr && modalPolicy == ModalPolicy::Refuse) {
             return modalRefusal(modal);
         }
         task->state = Started;

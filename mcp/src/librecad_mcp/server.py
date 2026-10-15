@@ -30,7 +30,7 @@ from .fields import (
 )
 from .guard import (
     USER_CONFIRMED_TEXT, Confirmation, allow_override_warnings, can_ask_user, check_path,
-    confirmation_refusal, was_asked,
+    confirmation_refusal, resolved_path, was_asked,
 )
 
 INSTRUCTIONS = """\
@@ -178,6 +178,70 @@ def _fmt_point(p) -> str:
 
 
 # --- confirmations (MCP elicitation, else user_confirmed) ----------------------------------------
+#
+# The question the user answers and the action the tool takes must be about the same thing. The
+# resolver that asks resolves the target (which drawing; which layer, with how many entities) and
+# pins it to the MCP request; after a yes the tool acts on exactly that target, and refuses
+# (not_confirmed) when it changed while the user was asked: another drawing became active, the
+# drawing closed or was renamed, entities were added to the layer.
+
+_PINNED: dict[str, dict] = {}
+_PINNED_MAX = 256
+
+
+def _request_key(ctx) -> str | None:
+    try:
+        return str(ctx.request_id) if ctx is not None else None
+    except Exception:  # noqa: BLE001 - outside a request there is nothing to pin to
+        return None
+
+
+def _pin(ctx, target: dict) -> None:
+    key = _request_key(ctx)
+    if key is None:
+        return
+    _PINNED.pop(key, None)
+    _PINNED[key] = target
+    while len(_PINNED) > _PINNED_MAX:
+        _PINNED.pop(next(iter(_PINNED)))
+
+
+def _pinned(ctx) -> dict | None:
+    """What the resolver asked the user about in this request (taken: a target is acted on once)."""
+    key = _request_key(ctx)
+    return _PINNED.pop(key, None) if key is not None else None
+
+
+def _changed_while_asked(nothing_done: str) -> dict:
+    return {"error": "not_confirmed",
+            "message": f"The drawing changed while the user was asked: {nothing_done}.",
+            "hint": "Check the drawing (list_documents, list_layers), then call the tool again so the user "
+                    "is asked about it as it is now."}
+
+
+def _needs_document_id(question: str, doc: dict | None, nothing_done: str) -> dict:
+    """The user_confirmed path names its drawing: the model passes that id, so a drawing that
+    became active meanwhile is never the one changed."""
+    out = {"error": "confirmation_required", "message": question,
+           "hint": "Show the user this question and ask. Call again with user_confirmed=True and "
+                   "document_id (below) only after they said yes in this conversation; "
+                   f"until then {nothing_done}."}
+    if doc is not None and isinstance(doc.get("id"), int):
+        out["document_id"] = doc["id"]
+    return out
+
+
+async def _active_document(c: LibreCadClient) -> dict | None:
+    docs = await c.documents()
+    for d in docs.get("documents") or []:
+        if d.get("active"):
+            return d
+    return None
+
+
+def _doc_label_text(d: dict) -> str:
+    return f"'{d.get('name') or d.get('path') or d.get('id')}'"
+
 
 async def _doc_label(c: LibreCadClient, document_id: int | None) -> tuple[str, dict | None]:
     """A name for the drawing the user recognizes, and its list_documents entry when found."""
@@ -187,7 +251,7 @@ async def _doc_label(c: LibreCadClient, document_id: int | None) -> tuple[str, d
         return ("the active drawing" if document_id is None else f"drawing {document_id}"), None
     for d in docs.get("documents") or []:
         if (document_id is None and d.get("active")) or (document_id is not None and d.get("id") == document_id):
-            return f"'{d.get('name') or d.get('path') or d.get('id')}'", d
+            return _doc_label_text(d), d
     return ("the active drawing" if document_id is None else f"drawing {document_id}"), None
 
 
@@ -206,16 +270,20 @@ async def _ask_discard(ctx: Context, discard_changes: bool = False,
         label, doc = ("the active drawing" if document_id is None else f"drawing {document_id}"), None
     if doc is not None and doc.get("modified") is False:
         return None  # nothing to discard: the tool closes it normally
+    _pin(ctx, {"document_id": doc.get("id") if doc is not None else document_id, "label": label})
     return Elicit(_discard_question(label), Confirmation)
 
 
 def _overwrite_question(path: str) -> str:
-    return f"Replace the existing file {path}? Its current content will be lost."
+    real = resolved_path(path)
+    # an 8.3 alias, a link or a junction: the user is asked about the file that is replaced
+    where = f"{path} (on disk: {real})" if real is not None else path
+    return f"Replace the existing file {where}? Its current content will be lost."
 
 
 def _ask_overwrite_for(kind: Literal["save", "export"]):
-    async def resolver(path: str, format: str, ctx: Context,
-                       overwrite: bool = False) -> Elicit[Confirmation] | None:
+    async def resolver(path: str, format: str, ctx: Context, overwrite: bool = False,
+                       document_id: int | None = None) -> Elicit[Confirmation] | None:
         if not overwrite or not can_ask_user(ctx):
             return None
         try:
@@ -224,8 +292,26 @@ def _ask_overwrite_for(kind: Literal["save", "export"]):
             return None  # the tool refuses the path without asking
         if not os.path.exists(norm):
             return None  # nothing to replace
+        # the drawing whose content replaces the file is the one active now, not after the answer
+        target = document_id
+        if target is None:
+            try:
+                async with _client() as c:
+                    active = await _active_document(c)
+                target = active.get("id") if active else None
+            except Exception:  # noqa: BLE001 - the tool reports the failure itself
+                target = None
+        _pin(ctx, {"document_id": target, "path": norm})
         return Elicit(_overwrite_question(norm), Confirmation)
     return resolver
+
+
+def _overwrite_target(document_id: int | None, answer, ctx) -> int | None:
+    """The drawing to write after the user said yes to replacing a file: the one pinned when asked."""
+    if not was_asked(answer):
+        return document_id
+    pinned = _pinned(ctx) or {}
+    return pinned.get("document_id", document_id) if pinned.get("document_id") is not None else document_id
 
 
 _ask_overwrite_save = _ask_overwrite_for("save")
@@ -243,11 +329,11 @@ def _overwrite_decision(norm: str, overwrite: bool, user_confirmed: bool, answer
     return (refusal is None), refusal
 
 
-def _delete_layer_question(name: str, entities: str, move_to: str, count) -> str:
+def _delete_layer_question(name: str, entities: str, move_to: str, count, where: str = "") -> str:
     n = f"{count} entities" if isinstance(count, int) else "its entities"
     what = {"delete": f"and delete {n} on it", "move": f"and move {n} to layer '{move_to}'",
             "refuse": "(it must be empty)"}[entities]
-    return f"Delete layer '{name}' {what}? Deleting a layer cannot be undone in LibreCAD."
+    return f"Delete layer '{name}'{where} {what}? Deleting a layer cannot be undone in LibreCAD."
 
 
 def _layer_key(name: str) -> str:
@@ -288,11 +374,18 @@ async def _ask_delete_layer(name: str, ctx: Context, entities: str = "refuse", m
         return None
     try:
         async with _client() as c:
-            layer = await _find_layer(c, document_id, name)
+            target = document_id
+            if target is None:
+                active = await _active_document(c)
+                target = active.get("id") if active else None
+            if target is None:
+                return None  # no drawing: the tool reports it
+            layer = await _find_layer(c, target, name)
     except Exception:  # noqa: BLE001 - the tool reports the failure itself
         return None
     if not _layer_needs_confirmation(name, entities, layer):
         return None
+    _pin(ctx, {"document_id": target, "layer": layer["name"], "entity_count": layer.get("entity_count")})
     return Elicit(_delete_layer_question(layer["name"], entities, move_to, layer.get("entity_count")),
                   Confirmation)
 
@@ -458,7 +551,8 @@ async def save_document_as(
     send_overwrite, refusal = _overwrite_decision(norm, overwrite, user_confirmed, answer, ctx)
     if refusal:
         return refusal
-    return await _call("documents", lambda c: c.save_document_as(document_id, norm, format, version,
+    target = _overwrite_target(document_id, answer, ctx)
+    return await _call("documents", lambda c: c.save_document_as(target, norm, format, version,
                                                                  send_overwrite))
 
 
@@ -505,6 +599,7 @@ async def export_document(
     send_overwrite, refusal = _overwrite_decision(norm, overwrite, user_confirmed, answer, ctx)
     if refusal:
         return refusal
+    target = _overwrite_target(document_id, answer, ctx)
     body: dict[str, Any] = {"path": norm, "format": format, "overwrite": send_overwrite}
     if format in ("dxf", "dwg"):
         body["version"] = version
@@ -517,7 +612,7 @@ async def export_document(
     async def run(c: LibreCadClient):
         if format == "pdf" and not await c.has_capability("export_pdf"):
             return {"error": "not available on this LibreCAD build (needs 'export_pdf' in get_status capabilities)"}
-        return await c.export_document(document_id, body)
+        return await c.export_document(target, body)
     return await _call("export", run)
 
 
@@ -535,25 +630,50 @@ async def close_document(
 
     A drawing with unsaved changes is not closed (unsaved_changes): save it first with
     save_document, or, if the user wants the changes thrown away, pass discard_changes=True;
-    this server then asks the user (MCP prompt, else user_confirmed). LibreCAD itself never asks.
+    this server then asks the user (MCP prompt, else user_confirmed together with the
+    document_id that confirmation_required names). LibreCAD itself never asks.
 
     Errors: unsaved_changes, unknown_document, no_document, confirmation_required,
     not_confirmed. Needs 'documents'."""
+    nothing_done = "the drawing was not closed"
+
     async def run(c: LibreCadClient):
         if not discard_changes:
             return await c.close_document(document_id, False)
-        if not was_asked(answer):
-            # A drawing without unsaved changes closes with nothing to discard and no question.
-            try:
-                return await c.close_document(document_id, False)
-            except Conflict as e:
-                if e.token != "unsaved_changes":
-                    raise
-        label, _ = await _doc_label(c, document_id)
+        if was_asked(answer):
+            pinned = _pinned(ctx) or {}
+            label = pinned.get("label") or ("the active drawing" if document_id is None else f"drawing {document_id}")
+            refusal = confirmation_refusal(answer, user_confirmed, _discard_question(label), can_ask_user(ctx),
+                                           nothing_done)
+            if refusal:
+                return refusal
+            # the drawing the user said yes to, still open under the same name
+            target = pinned.get("document_id", document_id)
+            if target is None:
+                active = await _active_document(c)
+                target = active.get("id") if active else None
+            now_label, now_doc = await _doc_label(c, target) if target is not None else (None, None)
+            if now_doc is None or now_label != label:
+                return _changed_while_asked(nothing_done)
+            return await c.close_document(target, True)
+        # A drawing without unsaved changes closes with nothing to discard and no question.
+        try:
+            return await c.close_document(document_id, False)
+        except Conflict as e:
+            if e.token != "unsaved_changes":
+                raise
+        label, doc = await _doc_label(c, document_id)
         refusal = confirmation_refusal(answer, user_confirmed, _discard_question(label), can_ask_user(ctx),
-                                       "the drawing was not closed")
+                                       nothing_done)
         if refusal:
+            if refusal["error"] == "confirmation_required" and doc is not None:
+                question = _discard_question(f"{label} (document_id {doc.get('id')})")
+                return _needs_document_id(question, doc, nothing_done)
             return refusal
+        if document_id is None:
+            # user_confirmed: the model names the drawing the user agreed to discard
+            return _needs_document_id(_discard_question(f"{label} (document_id {doc.get('id')})")
+                                      if doc is not None else _discard_question(label), doc, nothing_done)
         return await c.close_document(document_id, True)
     return await _call("documents", run)
 
@@ -774,7 +894,8 @@ async def delete_layer(
     ctx: Context | None = None,
     document_id: Annotated[int | None, _DOC] = None,
 ) -> dict:
-    """Delete a layer, after asking the user (MCP prompt, else user_confirmed). Returns
+    """Delete a layer, after asking the user (MCP prompt, else user_confirmed together with the
+    document_id that confirmation_required names). Returns
     {"deleted", "entities_deleted", "entities_moved", "undoable": false}: deleting a layer
     cannot be undone in LibreCAD.
 
@@ -785,24 +906,44 @@ async def delete_layer(
 
     Errors: unknown_layer, layer_not_empty, layer_locked, cannot_delete_layer_0,
     confirmation_required, not_confirmed. Needs 'layers'."""
+    nothing_done = "the layer was not deleted"
+
     async def run(c: LibreCadClient):
+        if was_asked(answer):
+            # The layer the user said yes to, in the drawing it was in, with as many entities as
+            # the question said: anything else is not what the user agreed to.
+            pinned = _pinned(ctx) or {}
+            question = _delete_layer_question(pinned.get("layer", name), entities, move_to, pinned.get("entity_count"))
+            refusal = confirmation_refusal(answer, user_confirmed, question, can_ask_user(ctx), nothing_done)
+            if refusal:
+                return refusal
+            if "layer" not in pinned:
+                return _changed_while_asked(nothing_done)
+            target_doc = pinned.get("document_id")
+            layer = await _find_layer(c, target_doc, pinned["layer"])
+            if layer is None or layer["name"] != pinned["layer"] or layer.get("entity_count") != pinned.get("entity_count"):
+                return _changed_while_asked(nothing_done)
+            return await c.delete_layer(target_doc, layer["name"], entities, move_to)
         # Act on the layer as listed: the question and the delete name the same layer, whatever
         # Unicode spelling of its name the call used. No match: nothing is deleted.
         layer = await _find_layer(c, document_id, name)
         if layer is None:
             return _unknown_layer(name)
         target = layer["name"]
-        if not was_asked(answer):
-            if not _layer_needs_confirmation(target, entities, layer):
-                return await c.delete_layer(document_id, target, entities, move_to)
-            question = _delete_layer_question(target, entities, move_to, layer.get("entity_count"))
-        else:
-            question = _delete_layer_question(target, entities, move_to, None)
-        refusal = confirmation_refusal(answer, user_confirmed, question, can_ask_user(ctx),
-                                       "the layer was not deleted")
-        if refusal:
+        if not _layer_needs_confirmation(target, entities, layer):
+            return await c.delete_layer(document_id, target, entities, move_to)
+        question = _delete_layer_question(target, entities, move_to, layer.get("entity_count"))
+        refusal = confirmation_refusal(answer, user_confirmed, question, can_ask_user(ctx), nothing_done)
+        if refusal is None and document_id is not None:
+            return await c.delete_layer(document_id, target, entities, move_to)
+        if refusal is not None and refusal["error"] != "confirmation_required":
             return refusal
-        return await c.delete_layer(document_id, target, entities, move_to)
+        # user_confirmed (or about to be asked for): the model names the drawing, so a drawing that
+        # became active meanwhile is never the one changed
+        _, doc = await _doc_label(c, document_id)
+        where = f" of {_doc_label_text(doc)} (document_id {doc.get('id')})" if doc is not None else ""
+        return _needs_document_id(_delete_layer_question(target, entities, move_to, layer.get("entity_count"), where),
+                                  doc, nothing_done)
     return await _call("layers", run)
 
 

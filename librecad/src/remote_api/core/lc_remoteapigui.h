@@ -89,9 +89,12 @@ namespace LC_RemoteApiGui {
 
     /**
      * GUI thread. Marks code of the user's own that pumps events in a nested
-     * loop (processEvents in openFile, newDrawingFromTemplate, ...): an API task
-     * posted meanwhile waits until the scope ends instead of running in the
-     * middle of it. Nested scopes count. A one-line hook in upstream code.
+     * loop (processEvents in openFile, newDrawingFromTemplate, a plugin's pick
+     * loop, ...): an API task posted meanwhile waits until the scope ends
+     * instead of running in the middle of it. When that code shows the user a
+     * modal dialog ("Save changes?"), tasks get 409 gui_modal_open at once as
+     * with any other dialog, and ModalPolicy::Allow tasks (GET /status) run.
+     * Nested scopes count. A one-line hook in upstream code.
      */
     class UserBusyScope {
     public:

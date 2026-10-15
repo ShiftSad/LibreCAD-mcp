@@ -911,6 +911,42 @@ TEST_CASE("Remote API GUI runner waits while user code pumps events", "[remote-a
     CHECK(response.status == 200);
 }
 
+TEST_CASE("Remote API GUI runner refuses at once while the user's busy code shows a dialog", "[remote-api][core][gui]") {
+    (void)lc::test::application();
+    // as doCloseAllFiles(): inside the user's action, a "Save changes?" dialog is open
+    const LC_RemoteApiGui::UserBusyScope busy;
+    QDialog dialog;
+    dialog.setWindowTitle("Save changes?");
+    dialog.setModal(true);
+    dialog.show();
+    pumpFor(50);
+    REQUIRE(QApplication::activeModalWidget() == &dialog);
+
+    std::atomic<bool> ran{false};
+    LC_ApiResponse refused;
+    LC_ApiResponse status;
+    QElapsedTimer timer;
+    timer.start();
+    runWhilePumping([&] {
+        refused = LC_RemoteApiGui::run([&] {
+            ran = true;
+            return LC_ApiResponse::ok({});
+        }, 5000, "POST /api/v1/entities");
+        status = LC_RemoteApiGui::run([] { return LC_ApiResponse::ok({{"ok", true}}); }, 5000, "GET /api/v1/status",
+                                      LC_RemoteApiGui::ModalPolicy::Allow);
+    });
+    const qint64 elapsed = timer.elapsed();
+    dialog.reject();
+    pumpFor(20);
+
+    CHECK_FALSE(ran.load());
+    CHECK(refused.status == 409); // not a 504 after the route's timeout
+    CHECK(refused.json.value("error").toString() == "gui_modal_open");
+    CHECK(refused.json.value("window").toString() == "Save changes?");
+    CHECK(status.status == 200);
+    CHECK(elapsed < 2000);
+}
+
 TEST_CASE("Remote API GUI runner never runs a task inside the user's popup menu", "[remote-api][core][gui]") {
     (void)lc::test::application();
     QWidget host;

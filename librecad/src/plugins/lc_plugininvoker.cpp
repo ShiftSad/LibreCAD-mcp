@@ -29,6 +29,7 @@
 #include <QToolTip>
 
 #include "doc_plugin_interface.h"
+#include "lc_remoteapigui.h" // librecad-mcp: no API task while a plugin runs
 #include "lc_undosection.h"
 #include "qc_applicationwindow.h"
 #include "qc_mdiwindow.h"
@@ -129,6 +130,7 @@ void LC_PluginInvoker::execPlug() const {
     //get actual drawing
     const QC_MDIWindow *w = m_appWindow->getCurrentMDIWindow();
     if (w != nullptr) {
+        const LC_RemoteApiGui::UserBusyScope remoteApiBusy; // librecad-mcp: no API task inside the plugin's pick loops (processEvents)
         RS_Document *currdoc = w->getDocument();
         //create document interface instance
         QG_GraphicView *graphicView = w->getGraphicView();

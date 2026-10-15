@@ -1249,6 +1249,19 @@ def step_negative(r: Runner, api: ApiClient, st: State) -> None:
         r.expect("an unknown query parameter -> 400 unknown_field", resp, 400, "unknown_field")
         resp = api.get("drawing", [("doc", doc), ("doc", doc)])
         r.expect("doc given twice -> 400 bad_param", resp, 400, "bad_param")
+        # a client that believes it capped its wait must not wait without bound
+        resp = api.get("status", headers={"X-Request-Timeout-Ms": "700.5"})
+        r.check("a deadline that is not whole milliseconds -> 400 bad_header",
+                resp.status == 400 and resp.error == "bad_header"
+                and resp.obj.get("header") == "X-Request-Timeout-Ms", resp)
+        resp = api.get("status", headers={"X-Request-Timeout-Ms": "5000"})
+        r.expect("a deadline in whole milliseconds -> 200", resp, 200)
+        # LibreCAD derives an aligned text's angle from its points: another one is refused, not dropped
+        resp = api.post("entities", {"entities": [{"type": "text", "position": [0, 0], "text": "x", "halign": "aligned",
+                                                   "second_point": [10, 2], "angle_deg": 45}]}, q)
+        r.check("an angle_deg LibreCAD derives for aligned text -> 422 invalid_entity naming it",
+                resp.status == 422 and resp.error == "invalid_entity"
+                and list(resp.obj.get("errors", {})) == ["entities[0].angle_deg"], resp)
         # a NUL would cut the name the system opens: run.bat would be written as a ".dxf"
         resp = api.post("documents/export", {"path": str(st.out_dir / "run.bat") + "\x00.dxf", "format": "dxf"}, q,
                         timeout=LONG_TIMEOUT)
@@ -1261,6 +1274,60 @@ def step_negative(r: Runner, api: ApiClient, st: State) -> None:
             took = time.monotonic() - started
         r.check("an idle connection does not hold up /status", resp.status == 200 and took < 3.0,
                 f"{took:.2f} s, {resp.status}")
+        # a client that ends its sending after the request (ncat, socat) still reads the answer
+        raw = b""
+        with socket.create_connection((api.host, api.port), timeout=10) as sock:
+            sock.sendall((f"GET /api/v1/status HTTP/1.1\r\nHost: 127.0.0.1:{api.port}\r\n"
+                          f"X-Api-Token: {api.token}\r\n\r\n").encode())
+            sock.shutdown(socket.SHUT_WR)
+            try:
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    raw += chunk
+            except OSError as e:
+                raw += f"<<{type(e).__name__}>>".encode()
+        while raw.startswith(b"HTTP/1.1 1") and b"\r\n\r\n" in raw:  # an interim 100 Continue
+            raw = raw.split(b"\r\n\r\n", 1)[1]
+        r.check("a client that half-closes after its request gets the answer", raw.startswith(b"HTTP/1.1 200"),
+                short(raw[:60]))
+        # a burst of whole requests: answered, or 503 server_busy, never taken for idle connections (408)
+        burst: list[int] = []
+
+        def one() -> None:
+            data = b""
+            try:
+                with socket.create_connection((api.host, api.port), timeout=20) as sock:
+                    sock.sendall((f"GET /api/v1/status HTTP/1.1\r\nHost: 127.0.0.1:{api.port}\r\n"
+                                  f"X-Api-Token: {api.token}\r\n\r\n").encode())
+                    while True:
+                        chunk = sock.recv(65536)
+                        if not chunk:
+                            break
+                        data += chunk
+            except OSError:
+                pass
+            parts = data.split(b" ", 2)
+            burst.append(int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0)
+
+        workers = [threading.Thread(target=one) for _ in range(24)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        r.check("a burst of 24 whole requests: 200 or 503, never 408, most of them 200",
+                set(burst) <= {200, 503} and burst.count(200) >= 12,
+                f"{sorted(burst)}")
+        # small requests are answered at once (a reader that slept between looks took 50 ms each)
+        times = []
+        for _ in range(11):
+            started = time.monotonic()
+            api.get("status")
+            times.append(time.monotonic() - started)
+        times.sort()
+        r.check("small requests are answered at once (median under 40 ms)", times[5] < 0.04,
+                f"{times[5] * 1000:.1f} ms")
 
 
 def step_mcp(r: Runner, api: ApiClient, st: State, args: argparse.Namespace, workdir: Path,

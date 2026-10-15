@@ -161,6 +161,7 @@ LC_HttpRequestParser::State LC_HttpRequestParser::parseHead(const QByteArrayView
         return fail(400, QStringLiteral("bad_request"), QStringLiteral("malformed request line"));
     }
     m_request.method = parts[0];
+    m_http10 = parts[2] == "HTTP/1.0";
 
     const QByteArray& target = parts[1];
     const qsizetype queryStart = target.indexOf('?');

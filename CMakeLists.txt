@@ -2285,6 +2285,9 @@ target_link_libraries (librecad_lib PRIVATE
                        LibreCAD::OpenType
                        Qt6::Core Qt6::Widgets Qt6::Gui Qt6::PrintSupport Qt6::Svg Qt6::Network
 )
+if (WIN32) # librecad-mcp: the Remote API server reads and writes its connections through Winsock
+    target_link_libraries (librecad_lib PRIVATE ws2_32)
+endif ()
 set_property (TARGET librecad_lib PROPERTY AUTOUIC_OPTIONS --connections string)
 
 # Filter work otherwise pulls the complete application library into a compile

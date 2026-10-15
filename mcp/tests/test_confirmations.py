@@ -13,14 +13,19 @@ async def test_discard_without_confirmation_is_refused(fake, doc):
     doc.modified = True
     out = await srv.close_document(discard_changes=True)
     assert out["error"] == "confirmation_required"
-    assert out["message"] == f"Close '{doc.name}' in LibreCAD and discard its unsaved changes? They cannot be recovered."
+    assert out["message"] == (f"Close '{doc.name}' (document_id {doc.id}) in LibreCAD and discard its unsaved "
+                              "changes? They cannot be recovered.")
+    assert out["document_id"] == doc.id and "document_id" in out["hint"]
     assert doc.id in fake.docs
     assert all(c["body"] != {"discard_changes": True} for c in requests(fake, "POST", "/documents/close"))
 
 
 async def test_discard_with_user_confirmed_when_the_client_cannot_ask(fake, doc):
     doc.modified = True
+    # the model names the drawing the user agreed to: a drawing that became active meanwhile is safe
     out = await srv.close_document(discard_changes=True, user_confirmed=True)
+    assert out["error"] == "confirmation_required" and out["document_id"] == doc.id and doc.id in fake.docs
+    out = await srv.close_document(discard_changes=True, user_confirmed=True, document_id=doc.id)
     assert out == {"closed": True, "discarded_changes": True}
 
 
@@ -64,9 +69,13 @@ async def test_delete_layer_without_confirmation(fake, doc):
     await _layer_with_entities(fake, count=0)
     out = await srv.delete_layer("walls")
     assert out["error"] == "confirmation_required"
-    assert out["message"] == "Delete layer 'walls' (it must be empty)? Deleting a layer cannot be undone in LibreCAD."
+    assert out["message"] == (f"Delete layer 'walls' of '{doc.name}' (document_id {doc.id}) (it must be empty)? "
+                              "Deleting a layer cannot be undone in LibreCAD.")
+    assert out["document_id"] == doc.id
     assert "walls" in doc.layers and requests(fake, "DELETE") == []
-    out = await srv.delete_layer("walls", user_confirmed=True)
+    out = await srv.delete_layer("walls", user_confirmed=True)  # without the drawing's id: asked for it
+    assert out["error"] == "confirmation_required" and "walls" in doc.layers
+    out = await srv.delete_layer("walls", user_confirmed=True, document_id=doc.id)
     assert out == {"deleted": "walls", "entities_deleted": 0, "entities_moved": 0, "undoable": False}
 
 
@@ -89,7 +98,8 @@ async def test_a_yes_deletes_and_moves(fake, doc, mode):
     assert "move 2 entities to layer '0'" in asker.questions[0]
     assert out["entities_moved"] == 2 and "walls" not in doc.layers
     assert {e["layer"] for e in doc.entities.values()} == {"0"}
-    assert requests(fake, "DELETE")[-1]["query"] == {"entities": ["move"], "move_to": ["0"]}
+    # the drawing is named: the one the user was asked about
+    assert requests(fake, "DELETE")[-1]["query"] == {"entities": ["move"], "move_to": ["0"], "doc": [str(doc.id)]}
 
 
 async def test_refusing_a_non_empty_layer_asks_nothing(fake, doc):
@@ -118,7 +128,8 @@ async def test_a_locked_layer_with_entities_is_refused_without_asking(fake, doc)
     # a locked target of the move is refused by LibreCAD too (after the usual question)
     await srv.update_layer("walls", locked=False)
     await srv.create_layer("archive", locked=True)
-    out = await srv.delete_layer("walls", entities="move", move_to="archive", user_confirmed=True)
+    out = await srv.delete_layer("walls", entities="move", move_to="archive", user_confirmed=True,
+                                 document_id=doc.id)
     assert out["error"] == "layer_locked" and out["layer"] == "archive" and "walls" in doc.layers
 
 
@@ -203,3 +214,83 @@ async def test_delete_layer_of_an_unknown_name_deletes_nothing(fake, doc):
     out = await srv.delete_layer("nope", user_confirmed=True)
     assert out["error"] == "unknown_layer" and out["name"] == "nope"
     assert requests(fake, "DELETE") == []
+
+
+# --- the user's yes is for the drawing and the layer they were asked about ----------------------------
+
+class SwitchingAsker(Asker):
+    """Answers yes; before its first answer something else changes LibreCAD (the user clicks another
+    tab, a parallel call adds entities)."""
+
+    def __init__(self, change):
+        super().__init__()
+        self.change = change
+
+    async def __call__(self, context, params):
+        if not self.questions:
+            self.change()
+        return await super().__call__(context, params)
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_discard_closes_the_drawing_the_user_was_asked_about(fake, mode):
+    important = fake.add_document("important")
+    scratch = fake.add_document("scratch")  # active
+    important.modified = scratch.modified = True
+    asker = SwitchingAsker(lambda: setattr(fake, "active", important.id))
+    out = await call("close_document", {"discard_changes": True}, mode, asker)
+    assert out == {"closed": True, "discarded_changes": True}
+    # the drawing closed is the one the last question named, and only that one
+    closed = [d for d in (important, scratch) if d.id not in fake.docs]
+    assert len(closed) == 1 and f"'{closed[0].name}'" in asker.questions[-1]
+    if mode == "legacy":
+        assert closed == [scratch] and important.id in fake.docs
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_delete_layer_acts_on_the_drawing_the_user_was_asked_about(fake, mode):
+    first = fake.add_document("first")
+    await _layer_with_entities(fake, count=1)
+    second = fake.add_document("second")
+    await _layer_with_entities(fake, count=3)
+    fake.active = first.id
+    asker = SwitchingAsker(lambda: setattr(fake, "active", second.id))
+    out = await call("delete_layer", {"name": "walls", "entities": "delete"}, mode, asker)
+    assert out["deleted"] == "walls"
+    # what was deleted is what the last question said
+    assert f"delete {out['entities_deleted']} entities" in asker.questions[-1]
+    if mode == "legacy":
+        assert out["entities_deleted"] == 1 and "walls" not in first.layers and "walls" in second.layers
+        assert len(second.entities) == 3
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_delete_layer_refuses_when_the_layer_grew_during_the_question(fake, doc, mode):
+    await _layer_with_entities(fake, count=1)
+
+    def grow():
+        doc.entities[9999] = {"id": 9999, "type": "point", "layer": "walls", "position": [5, 5]}
+
+    asker = SwitchingAsker(grow)
+    out = await call("delete_layer", {"name": "walls", "entities": "delete"}, mode, asker)
+    if "error" in out:
+        assert out["error"] == "not_confirmed" and "changed while the user was asked" in out["message"]
+        assert "walls" in doc.layers and len(doc.entities) == 2
+    else:  # asked again about the layer as it is now
+        assert asker.questions[-1].startswith("Delete layer 'walls' and delete 2 entities")
+        assert out["entities_deleted"] == 2
+    if mode == "legacy":
+        assert out["error"] == "not_confirmed"
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_overwrite_writes_the_drawing_active_when_the_user_was_asked(fake, tmp_path, mode):
+    first = fake.add_document("first")
+    second = fake.add_document("second", activate=False)
+    target = tmp_path / "out.svg"
+    target.write_bytes(b"old")
+    asker = SwitchingAsker(lambda: setattr(fake, "active", second.id))
+    out = await call("export_document", {"path": str(target), "format": "svg", "overwrite": True}, mode, asker)
+    assert out["format"] == "svg"
+    if mode == "legacy":
+        assert requests(fake, "POST", "/documents/export")[-1]["query"].get("doc") == [str(first.id)]

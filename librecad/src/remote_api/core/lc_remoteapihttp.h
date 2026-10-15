@@ -64,6 +64,8 @@ public:
     bool isEmpty() const { return m_buffer.isEmpty() && !m_headersDone; }
     // True once the request line and every header are in (the body may still be coming).
     bool headersComplete() const { return m_headersDone; }
+    // True for an HTTP/1.0 request (known once the headers are in).
+    bool isHttp10() const { return m_http10; }
 
     const LC_ApiError& error() const { return m_error; }
     const LC_ApiRequest& request() const { return m_request; }
@@ -78,6 +80,7 @@ private:
     State m_state = State::Incomplete;
     QByteArray m_buffer;
     bool m_headersDone = false;
+    bool m_http10 = false;
     qsizetype m_contentLength = 0;
     LC_ApiRequest m_request;
     LC_ApiError m_error{400, QStringLiteral("bad_request")};

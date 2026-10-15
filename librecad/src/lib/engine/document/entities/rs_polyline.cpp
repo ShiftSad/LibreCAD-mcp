@@ -220,7 +220,7 @@ std::unique_ptr<RS_Entity> RS_Polyline::createVertex(const RS_Vector& v, const d
     RS_DEBUG->print("RS_Polyline::createVertex: %f/%f to %f/%f bulge: %f", m_data.endpoint.x, m_data.endpoint.y, v.x, v.y, bulge);
 
     // create line for the polyline:
-    if (std::abs(bulge) < RS_TOLERANCE || std::abs(bulge) >= RS_MAXDOUBLE) {
+    if (std::abs(bulge) < 1.0e-8 || std::abs(bulge) >= RS_MAXDOUBLE) { // librecad-mcp: a smaller bulge sweeps under RS_TOLERANCE_ANGLE: RS_Arc would take it for a full circle
         entity = std::make_unique<RS_Line>(this, prepend ? v : m_data.endpoint, prepend ? m_data.startpoint : v);
     }
     else {
@@ -836,7 +836,7 @@ RS_Vector RS_Polyline::getVertex(const int index) const {
 }
 
 RS_Arc* RS_Polyline::arcFromBulge(const RS_Vector& start, const RS_Vector& end, const double bulge) {
-    if (std::abs(bulge) < RS_TOLERANCE || std::abs(bulge) >= RS_MAXDOUBLE) {
+    if (std::abs(bulge) < 1.0e-8 || std::abs(bulge) >= RS_MAXDOUBLE) { // librecad-mcp: as createVertex, a straight segment
         return nullptr;
     }
     const bool reversed = std::signbit(bulge);

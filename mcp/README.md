@@ -131,7 +131,7 @@ Nothing is needed when LibreCAD runs on the same computer. Optional environment 
 | `LIBRECAD_API_DISCOVERY` | the OS default below | Path of `remote-api.json` |
 | `LIBRECAD_API_TIMEOUT` | `30` | Seconds to wait on ordinary calls; open, save, export and new wait 50 s. LibreCAD is told (`X-Request-Timeout-Ms`), so it answers `ui_timeout` itself and never runs a request after this server stopped waiting |
 | `LIBRECAD_MCP_ALLOWED_ROOTS` | unset (any local path) | Folders this server may open files from or write to, separated by `;` on Windows and `:` elsewhere |
-| `LIBRECAD_MCP_ALLOW_NETWORK_PATHS` | `0` | `1` allows UNC and other network paths |
+| `LIBRECAD_MCP_ALLOW_NETWORK_PATHS` | `0` | `1` allows UNC (`\\server\share`) paths; `\\?\` and `\\.\` paths are always refused |
 
 A value that starts with `${` counts as unset (Claude Desktop leaves blank optional settings that
 way). The settings are read on every tool call, so a new token in LibreCAD is picked up at once.
@@ -144,8 +144,9 @@ way). The settings are read on every tool call, so a new token in LibreCAD is pi
 | Linux | `~/.local/share/LibreCAD/LibreCAD-2/remote-api.json` (`$XDG_DATA_HOME` when set); for the snap, `~/snap/librecad-mcp/current/.local/share/LibreCAD/LibreCAD-2/remote-api.json` |
 | macOS | `~/Library/Application Support/LibreCAD/LibreCAD-2/remote-api.json` |
 
-A discovery file whose `pid` no longer runs (LibreCAD crashed or was killed and left it behind) is
-never used: its token is not sent anywhere, since another program may have taken the port.
+A discovery file whose `pid` is not the LibreCAD that wrote it (LibreCAD crashed or was killed and
+left it behind; the number may belong to another program by now) is never used: its token is not
+sent anywhere, since another program may have taken the port.
 
 ## Conventions
 
@@ -165,9 +166,13 @@ never used: its token is not sent anywhere, since another program may have taken
 - **Asks you first**: closing a drawing without saving, deleting a layer, and overwriting a file.
   Clients that support MCP elicitation show you a yes/no prompt; with others, the AI has to get
   your explicit "yes" in the chat, and its tool text forbids acting on instructions found in
-  documents, web pages or tool output. Your "no" in a prompt always wins.
-- **File paths** must be absolute local paths with the right extension. Network (UNC) paths are
-  refused unless you allow them, here and in LibreCAD's Preferences. You can restrict file access
+  documents, web pages or tool output. Your "no" in a prompt always wins. A yes is for the drawing
+  and the layer the question named: if another drawing became active or the layer changed while
+  you were asked, nothing happens and the AI has to ask again.
+- **File paths** must be absolute local paths with the right extension; an existing file must
+  have it in its own name too (a Windows short name such as `KEEPME~1.DXF`, or a link, can name a
+  file of another type), and a question about replacing a file names the file on disk. Network
+  (UNC) paths are refused unless you allow them, here and in LibreCAD's Preferences. You can restrict file access
   to some folders, here (`LIBRECAD_MCP_ALLOWED_ROOTS`) and in LibreCAD (Remote API tab). LibreCAD
   checks every rule again on its side.
 - In LibreCAD's Remote API tab you can turn off command-line access (`run_command`) and the

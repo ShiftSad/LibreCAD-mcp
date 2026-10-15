@@ -26,40 +26,61 @@
 #include <condition_variable>
 #include <deque>
 #include <future>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
 
+#include <vector>
+
 #include <QByteArray>
+#include <QDeadlineTimer>
 #include <QString>
 #include <QThread>
 
 #include "lc_remoteapitypes.h"
 
+class LC_HttpRequestParser;
 class LC_RemoteApiContext;
 class LC_RemoteApiRouter;
-class QTcpSocket;
 
 /**
  * The HTTP transport of the Remote API (design sections 1.2 and 3.3).
  *
- * A QThread named "remote-api" that listens on 127.0.0.1 only. Each accepted
- * connection gets a reader thread of its own, so a client that is slow to send
- * (or sends nothing) holds up nobody but itself; requests are still handled one
- * at a time, in the order they arrive, by a single dispatcher thread. For each
- * connection, in order:
- *  1. read and parse the request: the request line and headers within the
- *     header timeout, everything within the read timeout (408), with the
- *     header (431) and body (413) limits; chunked bodies are refused (411);
+ * A QThread named "remote-api" that listens on 127.0.0.1 only. It reads every
+ * connection itself until the request headers are in, so a client that is slow
+ * to send (or sends nothing) holds no thread; a request past its headers and
+ * the checks gets a reader thread of its own, and requests are still handled
+ * one at a time, in the order they arrive, by a single dispatcher thread. For
+ * each connection, in order:
+ *  1. read the request line and headers within the header timeout (408), with
+ *     the header limit (431); chunked bodies are refused (411);
  *  2. check Host (421 bad_host), then Origin (403 origin_not_allowed), then
- *     the token, X-Api-Token or Authorization: Bearer (401 unauthorized);
- *  3. queue it for the dispatcher, which calls router.dispatch() (GUI routes
- *     run on the GUI thread). A request whose client has closed the connection
- *     by then is dropped without running, and X-Request-Timeout-Ms (the
- *     client's own deadline, in ms) caps how long it may wait for LibreCAD;
- *  4. write the response and close the connection.
- * At most maxConnections connections are read at the same time; one more is
- * answered 503 server_busy at once.
+ *     the token, X-Api-Token or Authorization: Bearer (401 unauthorized), then
+ *     X-Request-Timeout-Ms (400 bad_header), as soon as the headers are in: a
+ *     refused client never sends its body;
+ *  3. read the body within the read timeout (408), with the body limit (413);
+ *  4. queue it for the dispatcher, which calls router.dispatch() (GUI routes
+ *     run on the GUI thread). While it waits, the reader watches the client:
+ *     - X-Request-Timeout-Ms (the client's own deadline, in ms) caps the wait:
+ *       a request still queued then is answered 504 ui_timeout (started:
+ *       false) at once and never runs; one that runs stops waiting for the
+ *       GUI thread at that deadline;
+ *     - a client whose connection fails is gone: a queued request is dropped
+ *       without running, a running one stops waiting for the GUI thread;
+ *     - a client that ends its sending (a half-close, or a full close) may still
+ *       read: an HTTP/1.1 client is sent "100 Continue", and again every
+ *       interimRepeatMs while it waits, which a closed socket answers with a
+ *       reset (the client is gone), while a half-closed one simply reads them
+ *       before the final answer; an HTTP/1.0 client is sent nothing, so its
+ *       end of sending counts as a half-close;
+ *  5. write the response and close the connection.
+ * At most maxConnections requests are past their headers at the same time; one
+ * more is answered 503 server_busy. At most maxIncoming connections may still
+ * be sending their headers; when one more arrives, the oldest of them that has
+ * nothing waiting to be read is closed (408) to make room. Refused connections
+ * are read for a short while before they close, so that the client reads the
+ * refusal instead of a reset.
  *
  * The router and the context must outlive the server; the server only reads
  * the router (routes are added before start()).
@@ -72,7 +93,9 @@ public:
         int headerTimeoutMs = 5000;    // request line and headers, from the connection
         int readTimeoutMs = 15000;     // the whole request, from the connection
         int writeTimeoutMs = 15000;
-        int maxConnections = 16;       // read at the same time
+        int maxConnections = 16;       // requests past their headers at the same time
+        int maxIncoming = 64;          // connections still sending their headers
+        int interimRepeatMs = 1000;    // "100 Continue" again, to a client that ended its sending
     };
 
     enum class StartResult { Listening, PortInUse, Failed };
@@ -100,7 +123,7 @@ public:
     bool isListening() const { return m_listening.load(); }
     quint16 port() const { return m_port.load(); }
 
-    // Steps 2 and 3 for one parsed request (also used by the tests).
+    // Steps 2 and 4 for one parsed request (also used by the tests).
     LC_ApiResponse handle(const LC_ApiRequest& request) const;
 
 protected:
@@ -108,17 +131,35 @@ protected:
 
 private:
     struct Job;
+    struct Incoming;
+    using Readers = std::list<std::unique_ptr<QThread>>;
 
-    void serveConnection(qintptr descriptor);   // a reader thread
+    // A reader thread: the rest of the request, the dispatcher's answer, the response.
+    void serveConnection(qintptr descriptor, const std::shared_ptr<LC_HttpRequestParser>& parser,
+                         QDeadlineTimer readDeadline, QDeadlineTimer clientDeadline);
     void dispatchLoop();                        // the dispatcher thread
-    void refuseBusy(qintptr descriptor) const;  // the accepting thread
+    // The accepting thread: reads what a connection still sending its headers
+    // sent; true when it left the accepting thread (handed to a reader, refused
+    // or closed).
+    bool readIncoming(Incoming& incoming, QByteArray& buffer, Readers& readers);
+    // Steps 2 and the reader's start, for a connection whose headers are in.
+    void admit(Incoming& incoming, Readers& readers);
+    // Answers a connection on the accepting thread (one try: the answer is small).
+    void refuseConnection(qintptr descriptor, const LC_ApiResponse& response);
+    // Writes a refusal, then hands the connection to the accepting thread.
+    void refuseAndDrain(qintptr descriptor, const LC_ApiResponse& response);
+    // The accepting thread reads what the client still sends for a short while,
+    // then closes the connection: closing it with unread data would reset it,
+    // and the client would lose the answer.
+    void drainLater(qintptr descriptor);
+    void serviceDraining(bool closeAll);       // the accepting thread
     bool enqueue(const std::shared_ptr<Job>& job);
-    bool writeAll(QTcpSocket& socket, const QByteArray& data) const;
-    void drainAndClose(QTcpSocket& socket) const;
+    bool writeAll(qintptr descriptor, const QByteArray& data) const;
     bool hostAllowed(const QByteArray& host) const;
-    // Step 2: the refusal of a request that may not reach the router, if any.
-    std::optional<LC_ApiResponse> refusal(const LC_ApiRequest& request) const;
-    // Step 3 with every exception turned into an envelope.
+    // Step 2: the refusal of a request that may not reach the router, if any;
+    // otherwise clientDeadline (when given) gets its X-Request-Timeout-Ms.
+    std::optional<LC_ApiResponse> refusal(const LC_ApiRequest& request, QDeadlineTimer* clientDeadline = nullptr) const;
+    // Step 4 with every exception turned into an envelope.
     LC_ApiResponse dispatchSafely(const LC_ApiRequest& request) const;
 
     const LC_RemoteApiRouter& m_router;
@@ -139,6 +180,14 @@ private:
     std::mutex m_queueMutex;
     std::condition_variable m_queueChanged;
     std::deque<std::shared_ptr<Job>> m_queue;
+
+    // refused connections, read for a short while before they close
+    struct Draining {
+        qintptr descriptor = 0;
+        QDeadlineTimer until;
+    };
+    std::mutex m_drainMutex;
+    std::vector<Draining> m_draining;
 
     // the bind result, handed from run() to start()
     struct BindOutcome {

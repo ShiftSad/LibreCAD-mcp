@@ -37,6 +37,7 @@
 #include "rs_block.h"
 #include "rs_dimangular.h"
 #include "rs_ellipse.h"
+#include "rs_hatch.h"
 #include "rs_insert.h"
 #include "rs_layerlist.h"
 #include "rs_layerlistlistener.h"
@@ -883,6 +884,81 @@ TEST_CASE("Remote API: PATCH to an aligned or fit text keeps its second point", 
     CHECK(near(text.value(QStringLiteral("bbox")).toObject().value(QStringLiteral("max")).toArray().at(0).toDouble(), 20.0, 0.5));
 }
 
+TEST_CASE("Remote API: aligned, fit and middle text refuse values LibreCAD would not keep", "[remote-api][entities]") {
+    Drawing d;
+    lc::test::SourceFonts fonts;
+    // an aligned text needs no height: position and second_point give it, and its angle
+    const unsigned long long id = d.createOne(
+        R"({"entities":[{"type":"text","position":[40,60],"text":"AB","halign":"aligned","second_point":[50,62]}]})");
+    const QJsonObject made = entityOf(d, id);
+    const double height = made.value(QStringLiteral("height")).toDouble();
+    const double angle = made.value(QStringLiteral("angle_deg")).toDouble();
+    CHECK(height > 0.0);
+    CHECK(near(angle, RS_Math::rad2deg(std::atan2(2.0, 10.0)), 1e-6));
+    CHECK(made.value(QStringLiteral("valign")).toString() == QStringLiteral("baseline"));
+
+    // a value the text would not end with is refused, naming the field, and nothing is created
+    const std::vector<std::pair<const char*, QString>> refused{
+        {R"({"entities":[{"type":"text","position":[40,60],"text":"AB","halign":"aligned","second_point":[50,62],"height":7}]})",
+         QStringLiteral("entities[0].height")},
+        {R"({"entities":[{"type":"text","position":[40,60],"text":"AB","halign":"aligned","second_point":[50,62],"angle_deg":45}]})",
+         QStringLiteral("entities[0].angle_deg")},
+        {R"({"entities":[{"type":"text","position":[40,60],"text":"AB","height":2,"halign":"fit","second_point":[50,62],"angle_deg":45}]})",
+         QStringLiteral("entities[0].angle_deg")},
+        {R"({"entities":[{"type":"text","position":[40,60],"text":"AB","height":2,"halign":"fit","second_point":[50,62],"width_factor":2}]})",
+         QStringLiteral("entities[0].width_factor")},
+        {R"({"entities":[{"type":"text","position":[40,60],"text":"AB","height":2,"halign":"middle","valign":"top"}]})",
+         QStringLiteral("entities[0].valign")},
+        {R"({"entities":[{"type":"text","position":[40,60],"text":"AB","halign":"aligned","second_point":[50,62],"valign":"bottom"}]})",
+         QStringLiteral("entities[0].valign")}};
+    for (const auto& [body, field] : refused) {
+        CAPTURE(body);
+        const LC_ApiError e = errorOf([&] { d.create(body); });
+        CHECK(e.status == 422);
+        CHECK(e.token == QStringLiteral("invalid_entity"));
+        CHECK(e.extra.value(QStringLiteral("errors")).toObject().keys() == QStringList{field});
+    }
+    CHECK(d.liveCount() == 1);
+    // the values LibreCAD keeps pass: a copy of what GET reports
+    const QByteArray copy =
+        QStringLiteral(R"({"entities":[{"type":"text","position":[40,60],"text":"AB","halign":"aligned","second_point":[50,62],)"
+                       R"("height":%1,"angle_deg":%2,"valign":"baseline","width_factor":1}]})")
+            .arg(height, 0, 'g', 17)
+            .arg(angle, 0, 'g', 17)
+            .toUtf8();
+    CHECK(d.create(copy.constData()).value(QStringLiteral("ids")).toArray().size() == 1);
+    CHECK(d.createOne(R"({"entities":[{"type":"text","position":[0,0],"text":"AB","height":2,"halign":"middle","valign":"baseline"}]})") > 0);
+
+    // PATCH: an echo of every geometry field passes
+    QJsonObject echo;
+    for (const char* key : {"position", "text", "height", "angle_deg", "halign", "valign", "style", "width_factor", "second_point"}) {
+        echo.insert(QLatin1String(key), made.value(QLatin1String(key)));
+    }
+    QJsonArray warnings;
+    QString audit;
+    CHECK_NOTHROW(d.ops().update(id, LC_JsonReader(echo), warnings, audit));
+    // a field LibreCAD would override is refused, and the text stays as it was
+    for (const auto& [body, field] : std::vector<std::pair<const char*, QString>>{{R"({"height":5})", QStringLiteral("height")},
+                                                                                 {R"({"angle_deg":45})", QStringLiteral("angle_deg")},
+                                                                                 {R"({"valign":"top"})", QStringLiteral("valign")},
+                                                                                 {R"({"width_factor":2})", QStringLiteral("width_factor")}}) {
+        CAPTURE(body);
+        const LC_ApiError e = errorOf([&] { patchOf(d, id, body); });
+        CHECK(e.status == 422);
+        CHECK(e.extra.value(QStringLiteral("errors")).toObject().keys() == QStringList{field});
+        CHECK(near(entityOf(d, id).value(QStringLiteral("height")).toDouble(), height));
+        CHECK(near(entityOf(d, id).value(QStringLiteral("angle_deg")).toDouble(), angle));
+    }
+    // second_point is what changes them
+    const QJsonObject moved = patchOf(d, id, R"({"second_point":[60,60]})");
+    CHECK(moved.value(QStringLiteral("height")).toDouble() > height);
+    CHECK(near(moved.value(QStringLiteral("angle_deg")).toDouble(), 0.0, 1e-6));
+    // a left-aligned text takes all of them
+    const QJsonObject left = patchOf(d, id, R"({"halign":"left","height":5,"angle_deg":45,"valign":"top"})");
+    CHECK(near(left.value(QStringLiteral("height")).toDouble(), 5.0));
+    CHECK(near(left.value(QStringLiteral("angle_deg")).toDouble(), 45.0));
+}
+
 TEST_CASE("Remote API: PATCH keeps the angle an imported angular dimension shows", "[remote-api][entities]") {
     Drawing d;
     // as read from a file: P2-P1 and P-P3 with arc_point outside the sector they span
@@ -927,6 +1003,43 @@ TEST_CASE("Remote API: PATCH keeps the knots and weights of a spline", "[remote-
     // a spline the API made has nothing to lose
     const unsigned long long plain = d.createOne(R"({"entities":[{"type":"spline","control_points":[[0,0],[1,1],[2,0],[3,1]],"degree":3}]})");
     CHECK(patchOf(d, plain, R"({"degree":2})").value(QStringLiteral("degree")).toInt() == 2);
+}
+
+TEST_CASE("Remote API: a spline's bbox is the curve as drawn, whatever recalculated it last", "[remote-api][entities]") {
+    Drawing d;
+    // control points far off the curve: their hull reaches y = +-20, the curve about +-5.8
+    auto* spline = new RS_Spline(&d.graphic, RS_SplineData(3, false));
+    for (const RS_Vector& p : {RS_Vector(0.0, 0.0), RS_Vector(5.0, 20.0), RS_Vector(10.0, -20.0), RS_Vector(15.0, 0.0)}) {
+        spline->addControlPoint(p);
+    }
+    spline->update();
+    d.graphic.addEntity(spline);
+    const unsigned long long id = spline->lineage();
+    const QJsonValue drawn = entityOf(d, id).value(QStringLiteral("bbox"));
+    const double top = drawn.toObject().value(QStringLiteral("max")).toArray().at(1).toDouble();
+    CHECK(top < 10.0);
+    CHECK(top > 5.0);
+
+    // every path that recalculates borders gives the same box: a document's
+    // calculateBorders (as an undo cycle ends), its forced variant, the spline's own
+    d.graphic.calculateBorders();
+    CHECK(sameJson(entityOf(d, id).value(QStringLiteral("bbox")), drawn));
+    d.graphic.forcedCalculateBorders();
+    CHECK(sameJson(entityOf(d, id).value(QStringLiteral("bbox")), drawn));
+    spline->calculateBorders();
+    CHECK(sameJson(entityOf(d, id).value(QStringLiteral("bbox")), drawn));
+
+    // GET -> PATCH -> undo -> GET is the same entity
+    const QJsonObject before = entityOf(d, id);
+    patchOf(d, id, R"({"color":"#ff0000"})");
+    patchOf(d, id, R"({"control_points":[[0,0],[5,20],[10,-20],[15,1]]})");
+    REQUIRE(d.graphic.undo());
+    REQUIRE(d.graphic.undo());
+    d.graphic.calculateBorders();
+    const QJsonObject after = entityOf(d, id);
+    CHECK(sameJson(after.value(QStringLiteral("bbox")), before.value(QStringLiteral("bbox"))));
+    CHECK(sameJson(after.value(QStringLiteral("control_points")), before.value(QStringLiteral("control_points"))));
+    CHECK(after.value(QStringLiteral("color")) == before.value(QStringLiteral("color")));
 }
 
 TEST_CASE("Remote API: a closing segment LibreCAD leaves out keeps its vertex and its area", "[remote-api][entities]") {
@@ -1028,4 +1141,129 @@ TEST_CASE("Remote API: a polyline with elliptic segments is flagged and not rebu
     CHECK(e.token == QStringLiteral("invalid_entity"));
     // attributes still change
     CHECK(patchOf(d, id, R"({"color":"#00ff00"})").value(QStringLiteral("color")).toString() == QStringLiteral("#00ff00"));
+}
+
+TEST_CASE("Remote API: PATCH of arc_point measures the sector it moves into, as POST does", "[remote-api][entities]") {
+    Drawing d;
+    // L1 along x, L2 at 60 degrees, crossing at the origin
+    const double c = 10.0 * std::cos(M_PI / 3.0);
+    const double s = 10.0 * std::sin(M_PI / 3.0);
+    const QString lines = QStringLiteral(R"("line1":[[-10,0],[10,0]],"line2":[[%1,%2],[%3,%4]])")
+                              .arg(QString::number(-c, 'g', 17), QString::number(-s, 'g', 17), QString::number(c, 'g', 17),
+                                   QString::number(s, 'g', 17));
+    const auto post = [&](const char* arcPoint) {
+        const QString body = QStringLiteral(R"({"entities":[{"type":"dimension","dim_type":"angular",%1,"arc_point":%2}]})")
+                                 .arg(lines, QLatin1String(arcPoint));
+        return d.createOne(body.toUtf8().constData());
+    };
+    const auto measurement = [&](const unsigned long long id) {
+        return entityOf(d, id).value(QStringLiteral("measurement")).toDouble();
+    };
+    const unsigned long long id = post("[6,3]");
+    CHECK(near(measurement(id), 60.0, 1e-6));
+    // each sector: two of 60 degrees, two of 120 degrees
+    for (const char* arcPoint : {"[-3,6]", "[-5,-2]", "[3,-6]", "[6,3]"}) {
+        CAPTURE(arcPoint);
+        const double expected = measurement(post(arcPoint));
+        CHECK((near(expected, 60.0, 1e-6) || near(expected, 120.0, 1e-6)));
+        const QString arcOnly = QStringLiteral(R"({"arc_point":%1})").arg(QLatin1String(arcPoint));
+        CHECK(near(patchOf(d, id, arcOnly.toUtf8().constData()).value(QStringLiteral("measurement")).toDouble(), expected, 1e-6));
+        // the body of a POST measures the same angle as that POST
+        const QString full = QStringLiteral(R"({%1,"arc_point":%2})").arg(lines, QLatin1String(arcPoint));
+        CHECK(near(patchOf(d, id, full.toUtf8().constData()).value(QStringLiteral("measurement")).toDouble(), expected, 1e-6));
+        // and a PATCH that repeats what GET reports changes nothing
+        const QJsonObject now = entityOf(d, id);
+        QJsonObject echo;
+        for (const char* key : {"line1", "line2", "arc_point"}) {
+            echo.insert(QLatin1String(key), now.value(QLatin1String(key)));
+        }
+        CHECK(near(patchOf(d, id, compact(echo).toUtf8().constData()).value(QStringLiteral("measurement")).toDouble(), expected, 1e-6));
+    }
+}
+
+TEST_CASE("Remote API: PATCH of a hatch checks only the fields it names", "[remote-api][entities]") {
+    Drawing d;
+    const auto square = [&d] {
+        return d.createOne(R"({"entities":[{"type":"hatch","boundary":[[[0,0],[10,0],[10,10],[0,10]]]}]})");
+    };
+    const auto refusedField = [&d](const unsigned long long id, const char* body) {
+        QJsonArray warnings;
+        QString audit;
+        const LC_ApiError e = errorOf([&] { d.ops().update(id, LC_JsonReader(object(body)), warnings, audit); });
+        CHECK(e.status == 422);
+        const QJsonObject errors = e.extra.value(QStringLiteral("errors")).toObject();
+        return errors.isEmpty() ? e.extra.value(QStringLiteral("param")).toString() : errors.keys().value(0);
+    };
+
+    SECTION("a solid fill read from a file with scale 0") {
+        const unsigned long long id = square();
+        auto* hatch = static_cast<RS_Hatch*>(d.entity(id));
+        REQUIRE(hatch != nullptr);
+        hatch->setScale(0.0);
+        hatch->update();
+        REQUIRE(entityOf(d, id).value(QStringLiteral("scale")).toDouble() == 0.0);
+        CHECK(near(patchOf(d, id, R"({"angle_deg":30})").value(QStringLiteral("angle_deg")).toDouble(), 30.0));
+        CHECK(patchOf(d, id, R"({"pattern":"SOLID"})").value(QStringLiteral("pattern")).toString() == QStringLiteral("SOLID"));
+        CHECK(patchOf(d, id, R"({"scale":0,"pattern":"solid","angle_deg":0})").value(QStringLiteral("scale")).toDouble() == 0.0);
+        CHECK(near(entityOf(d, id).value(QStringLiteral("area")).toDouble(), 100.0, 1e-6));
+        // a pattern needs a real scale, and the error says so
+        CHECK(refusedField(id, R"({"pattern":"ANSI31"})") == QStringLiteral("scale"));
+        CHECK(refusedField(id, R"({"scale":-1})") == QStringLiteral("scale"));
+    }
+
+    SECTION("a pattern LibreCAD has no definition of") {
+        const unsigned long long id = square();
+        auto* hatch = static_cast<RS_Hatch*>(d.entity(id));
+        REQUIRE(hatch != nullptr);
+        hatch->setSolid(false);
+        hatch->setPattern(QStringLiteral("NO_SUCH_PATTERN_37"));
+        hatch->update();
+        REQUIRE(hatch->getUpdateError() == RS_Hatch::HATCH_PATTERN_NOT_FOUND);
+        CHECK(near(patchOf(d, id, R"({"scale":0.5})").value(QStringLiteral("scale")).toDouble(), 0.5));
+        CHECK(near(patchOf(d, id, R"({"angle_deg":15})").value(QStringLiteral("angle_deg")).toDouble(), 15.0));
+        const QJsonObject kept = patchOf(d, id, R"({"pattern":"no_such_pattern_37"})");
+        CHECK(kept.value(QStringLiteral("pattern")).toString().compare(QStringLiteral("NO_SUCH_PATTERN_37"), Qt::CaseInsensitive) == 0);
+        // the whole GET body back is no change either
+        const QJsonObject now = entityOf(d, id);
+        QJsonObject echo;
+        for (const char* key : {"pattern", "scale", "angle_deg"}) {
+            echo.insert(QLatin1String(key), now.value(QLatin1String(key)));
+        }
+        CHECK(patchOf(d, id, compact(echo).toUtf8().constData()).value(QStringLiteral("pattern")).toString() == now.value(QStringLiteral("pattern")).toString());
+        // a new pattern LibreCAD does not know is the request's error
+        CHECK(refusedField(id, R"({"pattern":"ANOTHER_MISSING_ONE"})") == QStringLiteral("pattern"));
+        // and SOLID always works
+        CHECK(patchOf(d, id, R"({"pattern":"SOLID"})").value(QStringLiteral("pattern")).toString() == QStringLiteral("SOLID"));
+    }
+}
+
+TEST_CASE("Remote API: a polyline read with a tiny bulge has a straight segment", "[remote-api][entities]") {
+    Drawing d;
+    // as the DXF and DWG import builds it (group 42 = 1e-9): not a full circle of radius chord / (4 * bulge)
+    auto* open = new RS_Polyline(&d.graphic);
+    open->addVertex(RS_Vector(0.0, 0.0), 1e-9);
+    open->addVertex(RS_Vector(10.0, 0.0));
+    d.graphic.addEntity(open);
+    const QJsonObject line = entityOf(d, open->lineage());
+    CHECK(near(line.value(QStringLiteral("length")).toDouble(), 10.0));
+    CHECK(line.value(QStringLiteral("bbox")).toObject().value(QStringLiteral("max")).toArray().at(1).toDouble() < 1.0);
+    CHECK(line.value(QStringLiteral("vertices")).toArray().at(0).toArray().size() == 2); // no bulge reported
+    const QJsonObject length = measureOf(d, QStringLiteral(R"({"kind":"length","ids":[%1]})").arg(open->lineage()));
+    CHECK(near(length.value(QStringLiteral("length")).toDouble(), 10.0));
+
+    // an LWPOLYLINE's way in: closed from the start, all vertices at once
+    auto* closed = new RS_Polyline(&d.graphic, RS_PolylineData(RS_Vector(false), RS_Vector(false), true));
+    closed->appendVertexs({{RS_Vector(0.0, 0.0), 5e-10}, {RS_Vector(20.0, 0.0), 0.0}, {RS_Vector(20.0, 20.0), 0.0},
+                           {RS_Vector(0.0, 20.0), 0.0}});
+    d.graphic.addEntity(closed);
+    const QJsonObject square = entityOf(d, closed->lineage());
+    CHECK(square.value(QStringLiteral("vertex_count")).toInt() == 4);
+    CHECK(near(square.value(QStringLiteral("area")).toDouble(), 400.0, 1e-6));
+    CHECK(near(square.value(QStringLiteral("length")).toDouble(), 80.0, 1e-6));
+    // a real small arc is still one
+    auto* arc = new RS_Polyline(&d.graphic);
+    arc->addVertex(RS_Vector(0.0, 0.0), 0.01);
+    arc->addVertex(RS_Vector(10.0, 0.0));
+    d.graphic.addEntity(arc);
+    CHECK(entityOf(d, arc->lineage()).value(QStringLiteral("length")).toDouble() > 10.0);
 }

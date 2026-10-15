@@ -7,7 +7,7 @@ from mcp.server.mcpserver import AcceptedElicitation, CancelledElicitation, Decl
 import mcp.types as types
 
 from librecad_mcp.guard import (BlockedByPolicy, Confirmation, allow_override_warnings, can_ask_user,
-                                check_path, confirmation_refusal, env_flag, env_value)
+                                check_path, confirmation_refusal, env_flag, env_value, resolved_path)
 
 
 def reason(path, kind="open", fmt=None, **kw):
@@ -37,14 +37,18 @@ def test_windows_path_is_normalized():
     (r"C:\a\CON.dxf", "bad_path"),              # device name
     (r"C:\a\nul.dwg", "bad_path"),
     (r"C:\a\CONIN$.dxf", "bad_path"),           # console device, as LibreCAD refuses it
+    ("C:\\a\\COM\u00b9.dxf", "bad_path"),         # superscript digits are reserved like plain ones
+    ("C:\\a\\lpt\u00b3.dxf", "bad_path"),
+    (r"C:\a\COM1 .dxf", "bad_path"),            # trailing spaces and dots do not hide a device
+    (r"C:\a\nul..dxf", "bad_path"),
     ("", "bad_path"),
     ("${user_config.path}", "bad_path"),
     ("~/plan.dxf", "bad_path"),
     (r"C:\a\\", "bad_path"),
     (r"\\server\share\plan.dxf", "network_path"),
     ("//server/share/plan.dxf", "network_path"),
-    (r"\\?\C:\a\plan.dxf", "network_path"),
-    (r"\\.\PhysicalDrive0", "network_path"),
+    (r"\\?\C:\a\plan.dxf", "device_path"),
+    (r"\\.\PhysicalDrive0", "device_path"),
 ])
 def test_windows_refusals(path, why):
     assert reason(path, windows=True, env={}) == why
@@ -54,6 +58,19 @@ def test_network_paths_need_the_explicit_opt_in():
     env = {"LIBRECAD_MCP_ALLOW_NETWORK_PATHS": "1"}
     assert check_path(r"\\server\share\plan.dxf", "open", windows=True, env=env)
     assert reason(r"\\server\share\plan.dxf", windows=True, env={"LIBRECAD_MCP_ALLOW_NETWORK_PATHS": "${x}"}) == "network_path"
+
+
+@pytest.mark.parametrize("path", [r"\\?\C:\a\host.txt:x.pdf", r"\\.\C:\a\host.txt:x.pdf", "//?/C:/a/host.txt:x.pdf",
+                                  r"\??\C:\a\plan.pdf", r"\\?\C:\a\plan.pdf", r"\\?\UNC\server\share\plan.pdf"])
+def test_device_namespace_paths_are_refused_even_when_network_paths_are_allowed(path):
+    # a local file through \\?\ would skip the drive and stream rules (LibreCAD refuses these too)
+    assert reason(path, "export", "pdf", windows=True, env={"LIBRECAD_MCP_ALLOW_NETWORK_PATHS": "1"}) == "device_path"
+
+
+def test_a_stream_on_a_share_is_refused():
+    env = {"LIBRECAD_MCP_ALLOW_NETWORK_PATHS": "1"}
+    assert reason(r"\\server\share\host.txt:x.pdf", "export", "pdf", windows=True, env=env) == "bad_path"
+    assert check_path(r"\\server\share\plan.pdf", "export", "pdf", windows=True, env=env)
 
 
 def test_windows_allowed_roots_are_case_insensitive_and_not_prefix_tricks():
@@ -116,6 +133,45 @@ def test_written_files_need_the_format_extension(kind, fmt, name, ok):
 
 def test_unknown_format():
     assert reason("/x/a.jpg", "export", "jpg", windows=False, env={}) == "unsupported_format"
+
+
+def _alias_of(target):
+    """A second name of target ending in .dxf: its 8.3 alias on Windows, a symbolic link elsewhere;
+    None when the system has neither."""
+    if os.name == "nt":
+        import ctypes
+        buffer = ctypes.create_unicode_buffer(4096)
+        n = ctypes.windll.kernel32.GetShortPathNameW(str(target), buffer, len(buffer))
+        alias = buffer.value if 0 < n < len(buffer) else ""
+        return alias if alias and os.path.basename(alias).lower() != target.name.lower() else None
+    link = target.with_name("link.dxf")
+    try:
+        link.symlink_to(target)
+    except OSError:
+        return None
+    return str(link)
+
+
+def test_an_existing_file_is_judged_by_its_own_name(tmp_path):
+    # KEEPME~1.DXF passes as a .dxf, but replacing it destroys keepme.dxfold (LibreCAD refuses it too)
+    kept = tmp_path / "keepme.dxfold"
+    kept.write_bytes(b"keep")
+    alias = _alias_of(kept)
+    if alias is None:
+        pytest.skip("no 8.3 names or symbolic links here")
+    assert alias.lower().endswith(".dxf")
+    with pytest.raises(BlockedByPolicy) as exc:
+        check_path(alias, "export", "dxf")
+    assert exc.value.body["reason"] == "extension_mismatch"
+    assert "keepme.dxfold" in exc.value.body["detail"] and "keepme.dxfold" in exc.value.body["hint"]
+    assert os.path.normcase(resolved_path(alias)) == os.path.normcase(os.path.realpath(kept))
+    # its own name, and a new file, need no second look
+    assert resolved_path(str(kept)) is None
+    assert resolved_path(str(tmp_path / "new.dxf")) is None
+    good = tmp_path / "a long drawing name.dxf"
+    good.write_bytes(b"0\nEOF\n")
+    if os.name == "nt" and (good_alias := _alias_of(good)) is not None:
+        assert check_path(good_alias, "export", "dxf")
 
 
 # --- environment hygiene ---------------------------------------------------------------------------

@@ -50,7 +50,7 @@ All entities accept `layer`, `color`, `linetype` and `lineweight`. Without them 
 | `point` | `position` |
 | `polyline` | `vertices`: `[x, y]` or `[x, y, bulge]` (at least 2), `closed` (false). bulge = tan(arc angle / 4), + counter-clockwise |
 | `spline` | either `control_points` (at least degree + 1) and `degree` (3; 1..3), or `fit_points` (at least 2); `closed` |
-| `text` | `position`, `text`, `height` > 0, `angle_deg` (0), `halign` (left, center, right, aligned, middle, fit), `valign` (baseline, bottom, middle, top), `style` ("standard"), `width_factor` (1); `second_point` (end of the baseline) is required for `aligned` and `fit` |
+| `text` | `position`, `text`, `height` > 0 (not for `aligned`), `angle_deg` (0), `halign` (left, center, right, aligned, middle, fit), `valign` (baseline, bottom, middle, top), `style` ("standard"), `width_factor` (1); `second_point` (end of the baseline) is required for `aligned` and `fit`, which take their angle from it (`aligned` its height too: leave `height`, `angle_deg` and `width_factor` out) and, like `middle`, sit on the baseline |
 | `mtext` | `position`, `text` (`\P` = new line), `height`, `width` (0 = no wrap), `angle_deg`, `attachment` (top_left ... bottom_right), `line_spacing` (1), `style` |
 | `dimension` | `dim_type` `linear`: `p1`, `p2`, `line_point`, `angle_deg` (0 horizontal, 90 vertical); `aligned`: `p1`, `p2`, `line_point`; `radial`: `center`, `point`, `leader_length`; `diametric`: `point`, `opposite_point`; `angular`: `line1`, `line2` (each two points), `arc_point`. All: `text` ("" = measured value), `style` |
 | `hatch` | `pattern` ("SOLID", or e.g. "ANSI31"), `scale` (1), `angle_deg` (0), and either `boundary` (loops of points, or `{vertices, closed}`) or `boundary_ids` (ids of closed entities) |
@@ -109,7 +109,7 @@ Tools never fail with an exception: problems come back as `{"error": "<token>", 
 | `file_exists` | Pass `overwrite=True` only after the user agreed. |
 | `unsaved_changes` | Save first, or ask the user before discarding. |
 | `blocked_by_local_policy` | This server refused a file path (see `reason` and `hint`). |
-| `confirmation_required` / `not_confirmed` | The action needs the user's yes. |
+| `confirmation_required` / `not_confirmed` | The action needs the user's yes. `confirmation_required` names the drawing (`document_id`): after the user's yes, call again with that `document_id` and `user_confirmed=True`. `not_confirmed` after a yes means the drawing changed while the user was asked: check it and ask again. |
 | `commands_disabled` | The user turned off command-line access in LibreCAD. |
 
 ## Safety

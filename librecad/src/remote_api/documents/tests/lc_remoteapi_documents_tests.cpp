@@ -76,6 +76,12 @@
 #include "rs_settings.h"
 #include "rs_system.h"
 
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace {
 
 using Access = LC_RemoteApiPathPolicy::Access;
@@ -417,6 +423,29 @@ TEST_CASE("Remote API path policy refuses unsafe paths", "[remote-api][documents
         CHECK_FALSE(LC_RemoteApiPathPolicy::isNetworkPath(existing));
     }
 
+#ifdef Q_OS_WIN
+    SECTION("device namespace paths are refused even with AllowNetworkPaths") {
+        LC_RemoteApiConfig config;
+        config.allowNetworkPaths = true;
+        const LC_RemoteApiPathPolicy network(config);
+        const QString native = QDir::toNativeSeparators(existing);
+        // "\\?\C:\...\existing.dxf:q.pdf" would write a hidden stream of a local file
+        const QStringList devicePaths{QStringLiteral("\\\\?\\") + native + QStringLiteral(":q.pdf"),
+                                      QStringLiteral("\\\\.\\") + native + QStringLiteral(":q.pdf"),
+                                      QStringLiteral("\\\\?\\") + native, QStringLiteral("//?/") + existing,
+                                      QStringLiteral("\\\\?\\UNC\\server\\share\\a.dxf"), QStringLiteral("\\??\\") + native};
+        for (const QString& path : devicePaths) {
+            CAPTURE(path);
+            CHECK(errorOf([&] { network.check(path, Access::Write, {".pdf", ".dxf"}, true); }) == Error{403, "path_not_allowed"});
+        }
+        // a stream on a share is refused like a local one
+        CHECK(errorOf([&] { network.check("\\\\server\\share\\host.txt:x.pdf", Access::Write, {".pdf"}); })
+              == Error{400, "bad_path"});
+        CHECK(errorOf([&] { network.check("//server/share/host.txt:x.pdf", Access::Write, {".pdf"}); })
+              == Error{400, "bad_path"});
+    }
+#endif
+
     SECTION("allowed roots") {
         LC_RemoteApiConfig config;
         config.allowedRoots = {dir.filePath("inside")};
@@ -468,10 +497,13 @@ TEST_CASE("Remote API path policy refuses unsafe paths", "[remote-api][documents
         // an alternate data stream of an existing file is not a file of its own
         CHECK(errorOf([&] { open.check(existing + QStringLiteral(":hidden.dxf"), Access::Write, {".dxf"}); })
               == Error{400, "bad_path"});
-        // nor is a device name a file
-        for (const char* device : {"inside/COM1.dxf", "inside/nul.dxf", "inside/CONIN$.dxf", "inside/Lpt9.svg"}) {
+        // nor is a device name a file (the superscript digits are reserved like the plain ones)
+        for (const QString& device : {QStringLiteral("inside/COM1.dxf"), QStringLiteral("inside/nul.dxf"),
+                                      QStringLiteral("inside/CONIN$.dxf"), QStringLiteral("inside/Lpt9.svg"),
+                                      QStringLiteral("inside/COM\u00b9.dxf"), QStringLiteral("inside/lpt\u00b3.png"),
+                                      QStringLiteral("inside/LPT\u00b2.dxf"), QStringLiteral("inside/COM1 .dxf")}) {
             CAPTURE(device);
-            CHECK(errorOf([&] { open.check(dir.filePath(QString::fromLatin1(device)), Access::Write); }) == Error{400, "bad_path"});
+            CHECK(errorOf([&] { open.check(dir.filePath(device), Access::Write); }) == Error{400, "bad_path"});
         }
         CHECK_FALSE(open.check(dir.filePath("inside/console.dxf"), Access::Write).isEmpty());
 #endif
@@ -502,6 +534,24 @@ TEST_CASE("Remote API path policy refuses unsafe paths", "[remote-api][documents
               == Error{403, "path_not_allowed"});
         // the folder itself is still usable
         CHECK_FALSE(policy.check(dir.filePath("inside/plain.dxf"), Access::Write).isEmpty());
+        // one file, two names: a drawing open there is not written through the junction
+        CHECK(LC_RemoteApiPathPolicy::sameFile(dir.filePath("outside/secret.dxf"), dir.filePath("inside/jn/secret.dxf")));
+        CHECK(LC_RemoteApiPathPolicy::sameFile(dir.filePath("outside/none.dxf"), dir.filePath("inside/jn/none.dxf")));
+        CHECK_FALSE(LC_RemoteApiPathPolicy::sameFile(dir.filePath("outside/secret.dxf"), dir.filePath("inside/jn/none.dxf")));
+        // a path over MAX_PATH through the junction is resolved too (Qt's writers reach it)
+        QString deep;
+        for (int i = 0; i < 6; ++i) {
+            deep += QStringLiteral("/") + QString(40, QChar(u'a' + i));
+        }
+        REQUIRE(QDir().mkpath(dir.filePath("outside") + deep));
+        REQUIRE(QDir().mkpath(dir.filePath("inside") + deep));
+        const QString longEscape = dir.filePath("inside/jn") + deep + QStringLiteral("/escaped.png");
+        REQUIRE(longEscape.size() > 300);
+        CHECK(errorOf([&] { policy.check(longEscape, Access::Write, {".png"}); }) == Error{403, "path_not_allowed"});
+        CHECK(errorOf([&] { policy.check(dir.filePath("inside/jn") + deep, Access::Read); }) == Error{403, "path_not_allowed"});
+        const QString longInside = dir.filePath("inside") + deep + QStringLiteral("/kept.png");
+        REQUIRE(longInside.size() > 260);
+        CHECK(policy.check(longInside, Access::Write, {".png"}) == QDir::cleanPath(longInside));
         // an allowed root that is itself a junction is resolved the same way
         LC_RemoteApiConfig viaJunction;
         viaJunction.allowedRoots = {dir.filePath("inside/jn")};
@@ -517,6 +567,63 @@ TEST_CASE("Remote API path policy refuses unsafe paths", "[remote-api][documents
 #endif
         CHECK_FALSE(LC_RemoteApiPathPolicy::sameFile(existing, dir.filePath("inside/other.dxf")));
         CHECK_FALSE(LC_RemoteApiPathPolicy::sameFile(existing, QString()));
+        // a hard link is the same file under another name
+        const QString hard = dir.filePath("inside/hard.dxf");
+#ifdef Q_OS_WIN
+        const bool linked = CreateHardLinkW(reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(hard).utf16()),
+                                            reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(existing).utf16()), nullptr) != 0;
+#else
+        const bool linked = ::link(QFile::encodeName(existing).constData(), QFile::encodeName(hard).constData()) == 0;
+#endif
+        if (linked) {
+            CHECK(LC_RemoteApiPathPolicy::sameFile(existing, hard));
+        }
+    }
+
+    SECTION("an existing file is judged by its own name too") {
+        const QString kept = dir.filePath("inside/keepme.dxfold");
+        {
+            QFile file(kept);
+            REQUIRE(file.open(QIODevice::WriteOnly));
+            file.write("keep");
+        }
+#ifdef Q_OS_WIN
+        // its 8.3 alias ends in .DXF ("KEEPME~1.DXF"): overwriting it as a DXF would destroy keepme.dxfold
+        std::wstring buffer(4096, L'\0');
+        const DWORD length = GetShortPathNameW(reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(kept).utf16()), buffer.data(),
+                                               static_cast<DWORD>(buffer.size()));
+        const QString alias = QDir::fromNativeSeparators(QString::fromWCharArray(buffer.data(), static_cast<qsizetype>(length)));
+        if (length == 0 || length >= buffer.size() || QFileInfo(alias).fileName().compare("keepme.dxfold", Qt::CaseInsensitive) == 0) {
+            SKIP("this volume has no 8.3 names");
+        }
+        CAPTURE(alias);
+        REQUIRE(QFileInfo(alias).suffix().compare("dxf", Qt::CaseInsensitive) == 0);
+        CHECK(errorOf([&] { open.check(alias, Access::Write, {".dxf"}, true); }) == Error{422, "extension_mismatch"});
+        try {
+            open.check(alias, Access::Write, {".dxf"}, true);
+        }
+        catch (const LC_ApiError& e) {
+            CHECK(e.toResponse().json.value("resolved").toString().endsWith("/keepme.dxfold"));
+        }
+        // an alias of a file whose own name has the right extension is fine
+        const QString longName = dir.filePath("inside/a long drawing name.dxf");
+        {
+            QFile file(longName);
+            REQUIRE(file.open(QIODevice::WriteOnly));
+            file.write("0\nEOF\n");
+        }
+        const DWORD longLength = GetShortPathNameW(reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(longName).utf16()),
+                                                   buffer.data(), static_cast<DWORD>(buffer.size()));
+        const QString longAlias = QDir::fromNativeSeparators(QString::fromWCharArray(buffer.data(), static_cast<qsizetype>(longLength)));
+        CAPTURE(longAlias);
+        CHECK_FALSE(open.check(longAlias, Access::Write, {".dxf"}, true).isEmpty());
+#else
+        // a symbolic link a.dxf leads to keepme.dxfold
+        const QString link = dir.filePath("inside/link.dxf");
+        REQUIRE(QFile::link(kept, link));
+        CHECK(errorOf([&] { open.check(link, Access::Write, {".dxf"}, true); }) == Error{422, "extension_mismatch"});
+#endif
+        CHECK(QFileInfo(kept).size() == 4);
     }
 }
 
@@ -727,6 +834,31 @@ TEST_CASE("Remote API documents: export writes copies and leaves the drawing as 
         CHECK(own.status == 409);
         CHECK(errorToken(own) == "file_open_in_other_window");
     }
+
+#ifdef Q_OS_WIN
+    SECTION("not over another drawing's file reached through a junction") {
+        const QString junction = QDir::toNativeSeparators(temp.filePath("jn"));
+        QProcess mklink;
+        mklink.start(QStringLiteral("cmd.exe"), {QStringLiteral("/c"), QStringLiteral("mklink"), QStringLiteral("/J"), junction,
+                                                 QDir::toNativeSeparators(temp.path())});
+        if (!mklink.waitForFinished(10000) || mklink.exitCode() != 0 || !QFileInfo(junction).exists()) {
+            SKIP("mklink /J is not available here");
+        }
+        const QByteArray before = fileStart(basePath, 1 << 20);
+        QC_MDIWindow* other = api.newDocument();
+        const LC_ApiResponse aliased = api.post("/api/v1/documents/export" + docQuery(other),
+                                                {{"path", temp.filePath("jn/base.dxf")}, {"format", "dxf"}, {"overwrite", true}});
+        CHECK(aliased.status == 409);
+        CHECK(errorToken(aliased) == "file_open_in_other_window");
+        CHECK(aliased.json.value("document").toInteger() == static_cast<qint64>(window->getId()));
+        // nor the drawing's own file
+        const LC_ApiResponse own = api.post("/api/v1/documents/export" + docQuery(window),
+                                            {{"path", temp.filePath("jn/base.dxf")}, {"format", "dxf"}, {"overwrite", true}});
+        CHECK(own.status == 409);
+        CHECK(fileStart(basePath, 1 << 20) == before);
+        QDir().rmdir(junction); // removes the junction, not the folder it points at
+    }
+#endif
 
     SECTION("PNG and SVG") {
         const QString png = temp.filePath("picture.png");

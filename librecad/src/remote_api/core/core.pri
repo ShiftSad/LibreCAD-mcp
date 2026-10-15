@@ -5,6 +5,9 @@
 INCLUDEPATH += $$PWD
 DEPENDPATH += $$PWD
 
+# the server reads and writes its connections through the native socket API
+win32: LIBS += -lws2_32
+
 HEADERS += \
     $$PWD/lc_remoteapiconfig.h \
     $$PWD/lc_remoteapicontext.h \
