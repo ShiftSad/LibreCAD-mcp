@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -25,12 +24,14 @@
 #include <QApplication>
 #include <QList>
 #include <QMdiArea>
+#include <QPointer>
 #include <QTabBar>
 
 #include "qc_applicationwindow.h"
 #include "qc_mdiwindow.h"
 #include "qg_actionhandler.h"
 #include "qg_graphicview.h"
+#include "lc_remoteapitypes.h"
 #include "qg_recentfiles.h"
 #include "rs_graphic.h"
 #include "rs_settings.h"
@@ -83,10 +84,27 @@ QC_MDIWindow* LC_RemoteApiAppAccess::openDocument(QC_ApplicationWindow* app, con
                                                   std::function<bool(bool, const QString&)> onImportError) {
     // librecad-mcp: mirrors QC_ApplicationWindow::openFile(fileName, type), with
     // onImportError in place of its message boxes. Keep the two in step.
-    QC_MDIWindow* w = app->createNewDrawingWindow(nullptr, path);
-    qApp->processEvents(QEventLoop::AllEvents, 1000);
+    // Unlike openFile, the events pumped here leave out the user's input: this
+    // runs inside an API task, where a dialog the user opens would be dismissed
+    // by the modal guard, and a window the user closes would be freed under it.
+    // The window is still watched, should something else close it.
+    const QPointer<QC_MDIWindow> w = app->createNewDrawingWindow(nullptr, path);
+    qApp->processEvents(QEventLoop::ExcludeUserInputEvents, 1000);
+    const auto closedMeanwhile = [] {
+        return LC_ApiError(409, QStringLiteral("document_closed"),
+                           QStringLiteral("the new drawing's window was closed while the file loaded"),
+                           {{QStringLiteral("hint"), QStringLiteral("open the file again")}});
+    };
+    if (w.isNull()) {
+        throw closedMeanwhile();
+    }
 
-    if (!w->loadDocument(path, type, RS2::DxfTextEncoding::Declared, std::move(onImportError))) {
+    // LC_DocumentsStorage::loadDocument pumps events too (without user input, inside an API task)
+    const bool loaded = w->loadDocument(path, type, RS2::DxfTextEncoding::Declared, std::move(onImportError));
+    if (w.isNull()) {
+        throw closedMeanwhile();
+    }
+    if (!loaded) {
         // file opening failed, clean up QC_MDIWindow and QMdiSubWindow, without asking
         close(app, w);
         return nullptr;

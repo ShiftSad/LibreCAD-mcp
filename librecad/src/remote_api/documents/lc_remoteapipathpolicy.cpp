@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -27,6 +26,10 @@
 #include <QJsonArray>
 #include <QJsonObject>
 
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
+
 #include "lc_remoteapitypes.h"
 
 namespace {
@@ -50,14 +53,55 @@ QString withSlashes(const QString& path) {
 }
 
 /**
+ * The final path of an existing file or folder, with every link resolved:
+ * symbolic links and, on Windows, every other reparse point too (directory
+ * junctions and volume mount points, which QFileInfo::canonicalFilePath()
+ * leaves as they are). Empty when it cannot be resolved.
+ */
+QString resolvedExisting(const QString& existingPath) {
+#ifdef Q_OS_WIN
+    // FILE_FLAG_BACKUP_SEMANTICS opens folders as well; no access right is
+    // needed to ask for the final name.
+    const std::wstring native = QDir::toNativeSeparators(existingPath).toStdWString();
+    const HANDLE handle = CreateFileW(native.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        std::wstring buffer(MAX_PATH, L'\0');
+        DWORD length = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                                 FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (length >= buffer.size()) {
+            buffer.resize(length + 1);
+            length = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                               FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        }
+        CloseHandle(handle);
+        if (length > 0 && length < buffer.size()) {
+            QString result = withSlashes(QString::fromWCharArray(buffer.data(), static_cast<qsizetype>(length)));
+            // "//?/C:/x" -> "C:/x"; "//?/UNC/host/share" -> "//host/share"
+            if (result.startsWith(QLatin1String("//?/UNC/"), Qt::CaseInsensitive)) {
+                result = QLatin1String("//") + result.mid(8);
+            }
+            else if (result.startsWith(QLatin1String("//?/"))) {
+                result = result.mid(4);
+            }
+            return QDir::cleanPath(result);
+        }
+    }
+#endif
+    return QFileInfo(existingPath).canonicalFilePath();
+}
+
+/**
  * The canonical form of path: of the file when it exists, else of its nearest
- * existing ancestor with the rest appended. Symbolic links and ".." are
- * resolved, so a path cannot leave an allowed folder through them.
+ * existing ancestor with the rest appended. Symbolic links, directory
+ * junctions (Windows) and ".." are resolved, so a path cannot leave an allowed
+ * folder through them.
  */
 QString canonicalForm(const QString& normalizedPath) {
     const QFileInfo info(normalizedPath);
     if (info.exists()) {
-        return info.canonicalFilePath();
+        const QString resolved = resolvedExisting(normalizedPath);
+        return resolved.isEmpty() ? normalizedPath : resolved;
     }
     QStringList rest{info.fileName()};
     QDir dir = info.absoluteDir();
@@ -67,7 +111,7 @@ QString canonicalForm(const QString& normalizedPath) {
             return normalizedPath;
         }
     }
-    QString base = QFileInfo(dir.absolutePath()).canonicalFilePath();
+    QString base = resolvedExisting(dir.absolutePath());
     if (base.isEmpty()) {
         return normalizedPath;
     }
@@ -75,6 +119,17 @@ QString canonicalForm(const QString& normalizedPath) {
         base += QLatin1Char('/');
     }
     return base + rest.join(QLatin1Char('/'));
+}
+
+/** The first control character (U+0000..U+001F, U+007F) of text, or -1. */
+qsizetype controlCharacter(const QString& text) {
+    for (qsizetype i = 0; i < text.size(); ++i) {
+        const char16_t c = text.at(i).unicode();
+        if (c < 0x20 || c == 0x7f) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 bool isUnder(const QString& path, QString root) {
@@ -138,7 +193,7 @@ bool LC_RemoteApiPathPolicy::isUnderAllowedRoot(const QString& normalizedPath) c
         if (!rootInfo.isAbsolute()) {
             continue;
         }
-        const QString rootPath = rootInfo.exists() ? rootInfo.canonicalFilePath()
+        const QString rootPath = rootInfo.exists() ? resolvedExisting(rootInfo.absoluteFilePath())
                                                    : QDir::cleanPath(rootInfo.absoluteFilePath());
         if (!rootPath.isEmpty() && isUnder(canonical, rootPath)) {
             return true;
@@ -152,6 +207,18 @@ QString LC_RemoteApiPathPolicy::check(const QString& path, const Access access, 
     const QString raw = path.trimmed();
     if (raw.isEmpty()) {
         fail(400, "bad_path", QStringLiteral("the path is empty"), path);
+    }
+    // A NUL ends the name the operating system sees, so the checks below would
+    // judge another name than the file written; no other control character
+    // belongs in a file name either.
+    if (const qsizetype at = controlCharacter(raw); at >= 0) {
+        QString shown = raw;
+        for (QChar& c : shown) {
+            if (c.unicode() < 0x20 || c.unicode() == 0x7f) {
+                c = QChar(0xFFFD);
+            }
+        }
+        fail(400, "bad_path", QStringLiteral("the path contains a control character (at %1)").arg(at), shown);
     }
 
     const bool network = isNetworkPath(raw);
@@ -167,6 +234,12 @@ QString LC_RemoteApiPathPolicy::check(const QString& path, const Access access, 
             && p.at(2) == QLatin1Char('/');
         if (!driveAbsolute) {
             fail(400, "bad_path", QStringLiteral("the path must be absolute (for example C:/drawings/a.dxf)"), path);
+        }
+        // "C:/a/host.txt:hidden.pdf" names an alternate data stream of host.txt:
+        // the extension and overwrite rules would judge another file than the one written
+        if (p.indexOf(QLatin1Char(':'), 2) >= 0) {
+            fail(400, "bad_path", QStringLiteral("':' is only allowed after the drive letter (alternate data streams are not files)"),
+                 path);
         }
 #else
         if (!QDir::isAbsolutePath(raw)) {
@@ -186,6 +259,20 @@ QString LC_RemoteApiPathPolicy::check(const QString& path, const Access access, 
     if (info.isDir()) {
         fail(400, "bad_path", QStringLiteral("the path names a folder, not a file"), normalized);
     }
+#ifdef Q_OS_WIN
+    // "COM1.dxf", "NUL.svg", "CONIN$.dxf": a device on Windows before 11, not a file
+    static const QStringList devices{QStringLiteral("CON"),    QStringLiteral("PRN"),     QStringLiteral("AUX"),
+                                     QStringLiteral("NUL"),    QStringLiteral("CONIN$"),  QStringLiteral("CONOUT$"),
+                                     QStringLiteral("COM1"),   QStringLiteral("COM2"),    QStringLiteral("COM3"),
+                                     QStringLiteral("COM4"),   QStringLiteral("COM5"),    QStringLiteral("COM6"),
+                                     QStringLiteral("COM7"),   QStringLiteral("COM8"),    QStringLiteral("COM9"),
+                                     QStringLiteral("LPT1"),   QStringLiteral("LPT2"),    QStringLiteral("LPT3"),
+                                     QStringLiteral("LPT4"),   QStringLiteral("LPT5"),    QStringLiteral("LPT6"),
+                                     QStringLiteral("LPT7"),   QStringLiteral("LPT8"),    QStringLiteral("LPT9")};
+    if (devices.contains(info.fileName().section(QLatin1Char('.'), 0, 0).trimmed(), Qt::CaseInsensitive)) {
+        fail(400, "bad_path", QStringLiteral("'%1' is a reserved Windows device name").arg(info.fileName()), normalized);
+    }
+#endif
 
     if (!extensions.isEmpty()) {
         const QString suffix = QLatin1Char('.') + info.suffix().toLower();

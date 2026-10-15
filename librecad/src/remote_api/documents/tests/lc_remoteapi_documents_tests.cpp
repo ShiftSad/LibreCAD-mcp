@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -49,6 +48,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
+#include <QProcess>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -450,6 +450,65 @@ TEST_CASE("Remote API path policy refuses unsafe paths", "[remote-api][documents
         CHECK(open.check(existing, Access::Write, {".dxf"}, true) == QDir::cleanPath(existing));
         CHECK(open.check(existing, Access::Read) == QDir::cleanPath(existing));
     }
+
+    SECTION("control characters: a NUL would cut the name the system opens") {
+        // "<dir>/run.bat\0.dxf" would pass the extension check as .dxf and write run.bat
+        const QString nul = dir.filePath("inside/run.bat") + QChar(0) + QStringLiteral(".dxf");
+        CHECK(errorOf([&] { open.check(nul, Access::Write, {".dxf"}); }) == Error{400, "bad_path"});
+        // nor can it get past the overwrite rule
+        const QString overwrite = existing + QChar(0) + QStringLiteral(".dxf");
+        CHECK(errorOf([&] { open.check(overwrite, Access::Write, {".dxf"}); }) == Error{400, "bad_path"});
+        CHECK(errorOf([&] { open.check(existing + QChar(0), Access::Read); }) == Error{400, "bad_path"});
+        for (const QChar c : {QChar(0x01), QChar(0x0a), QChar(0x1f), QChar(0x7f)}) {
+            CHECK(errorOf([&] { open.check(dir.filePath("inside/a") + c + QStringLiteral("b.dxf"), Access::Write); })
+                  == Error{400, "bad_path"});
+        }
+        CHECK_FALSE(QFileInfo::exists(dir.filePath("inside/run.bat")));
+#ifdef Q_OS_WIN
+        // an alternate data stream of an existing file is not a file of its own
+        CHECK(errorOf([&] { open.check(existing + QStringLiteral(":hidden.dxf"), Access::Write, {".dxf"}); })
+              == Error{400, "bad_path"});
+        // nor is a device name a file
+        for (const char* device : {"inside/COM1.dxf", "inside/nul.dxf", "inside/CONIN$.dxf", "inside/Lpt9.svg"}) {
+            CAPTURE(device);
+            CHECK(errorOf([&] { open.check(dir.filePath(QString::fromLatin1(device)), Access::Write); }) == Error{400, "bad_path"});
+        }
+        CHECK_FALSE(open.check(dir.filePath("inside/console.dxf"), Access::Write).isEmpty());
+#endif
+    }
+
+#ifdef Q_OS_WIN
+    SECTION("a directory junction inside an allowed folder does not lead out of it") {
+        const QString junction = QDir::toNativeSeparators(dir.filePath("inside/jn"));
+        const QString target = QDir::toNativeSeparators(dir.filePath("outside"));
+        QProcess mklink;
+        mklink.start(QStringLiteral("cmd.exe"), {QStringLiteral("/c"), QStringLiteral("mklink"), QStringLiteral("/J"), junction, target});
+        if (!mklink.waitForFinished(10000) || mklink.exitCode() != 0 || !QFileInfo(junction).exists()) {
+            SKIP("mklink /J is not available here");
+        }
+        {
+            QFile secret(dir.filePath("outside/secret.dxf"));
+            REQUIRE(secret.open(QIODevice::WriteOnly));
+            secret.write("0\nEOF\n");
+        }
+        LC_RemoteApiConfig config;
+        config.allowedRoots = {dir.filePath("inside")};
+        const LC_RemoteApiPathPolicy policy(config);
+        CHECK(errorOf([&] { policy.check(dir.filePath("inside/jn/escaped.dxf"), Access::Write); })
+              == Error{403, "path_not_allowed"});
+        CHECK(errorOf([&] { policy.check(dir.filePath("inside/jn/secret.dxf"), Access::Read); })
+              == Error{403, "path_not_allowed"});
+        CHECK(errorOf([&] { policy.check(dir.filePath("inside/jn/deeper/new.dxf"), Access::Write); })
+              == Error{403, "path_not_allowed"});
+        // the folder itself is still usable
+        CHECK_FALSE(policy.check(dir.filePath("inside/plain.dxf"), Access::Write).isEmpty());
+        // an allowed root that is itself a junction is resolved the same way
+        LC_RemoteApiConfig viaJunction;
+        viaJunction.allowedRoots = {dir.filePath("inside/jn")};
+        CHECK_FALSE(LC_RemoteApiPathPolicy(viaJunction).check(dir.filePath("outside/new.dxf"), Access::Write).isEmpty());
+        QDir().rmdir(junction); // removes the junction, not the folder it points at
+    }
+#endif
 
     SECTION("same file") {
         CHECK(LC_RemoteApiPathPolicy::sameFile(existing, dir.filePath("inside/../inside/existing.dxf")));
@@ -924,5 +983,21 @@ TEST_CASE("Remote API drawing info and formats routes", "[remote-api][documents]
     REQUIRE(formats.status == 200);
     CHECK(formats.json.value("open").toArray().contains(QJsonValue(".dxf")));
     CHECK(formats.json.value("save").toArray().size() == 2);
+
+    // unknown query parameters are refused on every route, not ignored (doc is always accepted)
+    for (const QString& target : {QStringLiteral("/api/v1/drawing?detial=full"), QStringLiteral("/api/v1/formats?bogus=1"),
+                                  QStringLiteral("/api/v1/documents?docs=1"), QStringLiteral("/api/v1/view?bogus=1"),
+                                  QStringLiteral("/api/v1/commands?bogus=1")}) {
+        CAPTURE(target);
+        const LC_ApiResponse refused = api.get(target);
+        CHECK(refused.status == 400);
+        CHECK(errorToken(refused) == "unknown_field");
+    }
+    CHECK(api.post(QStringLiteral("/api/v1/undo?bogus=1") + QStringLiteral("&doc=%1").arg(window->getId())).status == 400);
+    CHECK(api.get("/api/v1/formats?doc=0").status == 200);
+    // a doc given twice would act on one of them at random
+    const LC_ApiResponse twice = api.get(QStringLiteral("/api/v1/drawing?doc=%1&doc=%1").arg(window->getId()));
+    CHECK(twice.status == 400);
+    CHECK(twice.json.value("param").toString() == "doc");
     CHECK(api.modals.isEmpty());
 }

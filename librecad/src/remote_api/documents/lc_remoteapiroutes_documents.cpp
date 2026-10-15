@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -221,17 +220,7 @@ int liveEntityCount(RS_Document* document) {
 }
 
 QString documentName(const QC_MDIWindow* window) {
-    const QString path = window->getFileName();
-    if (!path.isEmpty()) {
-        return QFileInfo(path).fileName();
-    }
-    // "unnamed document 3[*]", maybe followed by " [Draft Mode]"
-    QString title = window->windowTitle();
-    const qsizetype marker = title.indexOf(QLatin1String("[*]"));
-    if (marker >= 0) {
-        title.truncate(marker);
-    }
-    return title.trimmed();
+    return LC_RemoteApiContext::documentName(window);
 }
 
 /** The Doc schema of section 2.3. */
@@ -1004,60 +993,68 @@ LC_ApiResponse listCommands(LC_ApiCall& /*call*/) {
     return LC_ApiResponse::ok({{QStringLiteral("commands"), toArray(commands)}});
 }
 
+/** handler, after refusing every query parameter but doc (as the entity routes do). */
+LC_ApiHandler onlyDocQuery(LC_ApiHandler handler) {
+    return [handler = std::move(handler)](LC_ApiCall& call) {
+        allowQuery(call.request, {"doc"});
+        return handler(call);
+    };
+}
+
 } // namespace
 
 void lcRegisterDocumentRoutes(LC_RemoteApiRouter& router) {
     router.add("GET", QStringLiteral("/api/v1/formats"),
                routeOptions("documents", "File types LibreCAD opens, and the DXF/DWG versions it saves and exports",
                             FormatsTimeoutMs, false, false),
-               getFormats);
+               onlyDocQuery(getFormats));
     router.add("GET", QStringLiteral("/api/v1/documents"),
-               routeOptions("documents", "Open drawings", DefaultTimeoutMs, false, false), listDocuments);
+               routeOptions("documents", "Open drawings", DefaultTimeoutMs, false, false), onlyDocQuery(listDocuments));
     router.add("POST", QStringLiteral("/api/v1/documents/new"),
                routeOptions("documents", "New drawing from the default template", FileTimeoutMs, false, true),
-               newDocument);
+               onlyDocQuery(newDocument));
     router.add("POST", QStringLiteral("/api/v1/documents/open"),
                routeOptions("documents", "Open a drawing file (DXF, DWG, LFF, CXF, JWW, SHP)", FileTimeoutMs, false,
                             true),
-               openDocument);
+               onlyDocQuery(openDocument));
     router.add("POST", QStringLiteral("/api/v1/documents/activate"),
                routeOptions("documents", "Make a drawing the active window", DefaultTimeoutMs, true, false),
-               activateDocument);
+               onlyDocQuery(activateDocument));
     router.add("POST", QStringLiteral("/api/v1/documents/save"),
                routeOptions("documents", "Save a drawing to its file, in its format", FileTimeoutMs, true, true),
-               saveDocument);
+               onlyDocQuery(saveDocument));
     router.add("POST", QStringLiteral("/api/v1/documents/save_as"),
                routeOptions("documents", "Save a drawing under a new name and format", FileTimeoutMs, true, true),
-               saveDocumentAs);
+               onlyDocQuery(saveDocumentAs));
     router.add("POST", QStringLiteral("/api/v1/documents/export"),
                routeOptions("export", "Write a copy of a drawing as DXF, DWG, PDF, PNG or SVG", FileTimeoutMs, true,
                             false),
-               exportDocument);
+               onlyDocQuery(exportDocument));
     router.add("POST", QStringLiteral("/api/v1/documents/close"),
-               routeOptions("documents", "Close a drawing; never asks", DefaultTimeoutMs, true, true), closeDocument);
+               routeOptions("documents", "Close a drawing; never asks", DefaultTimeoutMs, true, true), onlyDocQuery(closeDocument));
     router.add("GET", QStringLiteral("/api/v1/drawing"),
                routeOptions("drawing", "Units, extents, format, entity counts, layers, blocks and undo state",
                             DefaultTimeoutMs, true, false),
-               drawingInfo);
+               onlyDocQuery(drawingInfo));
     router.add("GET", QStringLiteral("/api/v1/render"),
                routeOptions("render", "PNG picture of a drawing (the user's view is not changed)", RenderTimeoutMs,
                             true, false),
                render);
     router.add("GET", QStringLiteral("/api/v1/view"),
-               routeOptions("view", "The visible window of the user's view", DefaultTimeoutMs, true, false), getView);
+               routeOptions("view", "The visible window of the user's view", DefaultTimeoutMs, true, false), onlyDocQuery(getView));
     router.add("POST", QStringLiteral("/api/v1/view"),
-               routeOptions("view", "Zoom or pan the user's view", DefaultTimeoutMs, true, false), setView);
+               routeOptions("view", "Zoom or pan the user's view", DefaultTimeoutMs, true, false), onlyDocQuery(setView));
     router.add("POST", QStringLiteral("/api/v1/undo"),
                routeOptions("undo", "Undo entity changes (layer and block-list changes are not undoable)",
                             DefaultTimeoutMs, true, true),
-               [](LC_ApiCall& call) { return undoRedo(call, true); });
+               onlyDocQuery([](LC_ApiCall& call) { return undoRedo(call, true); }));
     router.add("POST", QStringLiteral("/api/v1/redo"),
                routeOptions("undo", "Redo entity changes", DefaultTimeoutMs, true, true),
-               [](LC_ApiCall& call) { return undoRedo(call, false); });
+               onlyDocQuery([](LC_ApiCall& call) { return undoRedo(call, false); }));
     router.add("POST", QStringLiteral("/api/v1/command"),
                routeOptions("command", "Type command-line commands and inputs", CommandTimeoutMs, true, true, true),
-               runCommand);
+               onlyDocQuery(runCommand));
     router.add("GET", QStringLiteral("/api/v1/commands"),
                routeOptions("command", "Command names the command line accepts", DefaultTimeoutMs, false, false),
-               listCommands);
+               onlyDocQuery(listCommands));
 }

@@ -2,7 +2,6 @@
  *
  This file is part of the LibreCAD project, a 2D CAD program
 
- Copyright (C) 2026 LibreCAD.org
  Copyright (C) 2026 LibreCAD-mcp contributors
 
  This program is free software; you can redistribute it and/or
@@ -44,10 +43,13 @@ public:
     /**
      * Checks path for access and returns it normalized (absolute, clean, '/'
      * separators). Throws LC_ApiError, in this order:
-     * - 400 bad_path (+path): empty, relative (also drive-relative "C:x" and
+     * - 400 bad_path (+path): empty, with a control character (a NUL would cut
+     *   the name the system opens), with a ':' after the drive (an alternate
+     *   data stream, Windows), relative (also drive-relative "C:x" and
      *   rooted "\x" on Windows), or a directory;
      * - 403 path_not_allowed (+path): a UNC, \\?\ or device path while
-     *   AllowNetworkPaths is off, or outside every AllowedRoots folder;
+     *   AllowNetworkPaths is off, or outside every AllowedRoots folder (after
+     *   resolving symbolic links and, on Windows, junctions and mount points);
      * - 422 extension_mismatch (+path, +allowed): extensions is not empty and
      *   the file's extension (".dxf", compared case-insensitively) is not in it;
      * - Read: 404 file_not_found (+path);
